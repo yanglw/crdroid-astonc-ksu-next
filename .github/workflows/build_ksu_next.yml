@@ -43,17 +43,23 @@ jobs:
       - name: Fetch Stock boot.img from URL
         run: |
           mkdir -p prebuilt
-          RAW_URL="${{ github.event.inputs.boot_url }}"
+          RAW_INPUT="${{ github.event.inputs.boot_url }}"
           
-          if [[ "$RAW_URL" == *"sourceforge.net/projects/"* ]]; then
-            CLEAN_URL=$(echo "$RAW_URL" | sed -e 's|sourceforge.net/projects/|downloads.sourceforge.net/project/|' -e 's|/files/|/|' -e 's|/download||')
-          else
-            CLEAN_URL="$RAW_URL"
+          # 提取纯净 URL（自动兼容误贴的 markdown 格式或首尾多余字符）
+          CLEAN_URL=$(echo "$RAW_INPUT" | grep -oE 'https?://[^])" >]+' | head -n 1)
+          if [ -z "$CLEAN_URL" ]; then
+            CLEAN_URL="$RAW_INPUT"
+          fi
+
+          # 针对 SourceForge 链接转换为直链下载地址
+          if [[ "$CLEAN_URL" == *"sourceforge.net/projects/"* ]]; then
+            CLEAN_URL=$(echo "$CLEAN_URL" | sed -E -e 's|/download/?$||' -e 's|sourceforge\.net/projects/|downloads.sourceforge.net/project/|' -e 's|/files/|/|')
           fi
 
           echo "Downloading boot.img from: $CLEAN_URL"
           curl -LSs -f -o prebuilt/boot.img "$CLEAN_URL" || \
-          curl -LSs -f -o prebuilt/boot.img "${RAW_URL}?use_mirror=autoselect"
+          curl -LSs -f -o prebuilt/boot.img "${CLEAN_URL}?use_mirror=autoselect" || \
+          curl -LSs -f -o prebuilt/boot.img "${RAW_INPUT}"
 
           FILE_INFO=$(file prebuilt/boot.img)
           echo "File verification: $FILE_INFO"
@@ -63,10 +69,18 @@ jobs:
           fi
 
       - name: Setup Tools & Inspect Stock boot.img
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 从 Magisk 官方发布版本直接提取 x86_64 架构的 magiskboot
-          echo "Fetching magiskboot from Magisk release..."
-          curl -LSs -f "https://github.com/topjohnwu/Magisk/releases/latest/download/Magisk.apk" -o /tmp/magisk.apk || \
+          # 动态获取 Magisk 官方最新 Release APK 资产直链（避免资产名含版本号导致 404）
+          echo "Resolving latest Magisk APK download URL..."
+          MAGISK_URL=$(curl -s ${GITHUB_TOKEN:+-H "Authorization: Bearer $GITHUB_TOKEN"} "https://api.github.com/repos/topjohnwu/Magisk/releases/latest" | grep "browser_download_url.*Magisk-.*\.apk" | head -n 1 | cut -d '"' -f 4 || true)
+          if [ -z "$MAGISK_URL" ]; then
+            MAGISK_URL="https://github.com/topjohnwu/Magisk/releases/download/v30.7/Magisk-v30.7.apk"
+          fi
+
+          echo "Downloading Magisk from: $MAGISK_URL"
+          curl -LSs -f "$MAGISK_URL" -o /tmp/magisk.apk || \
           curl -LSs -f "https://github.com/topjohnwu/Magisk/releases/download/v30.7/Magisk-v30.7.apk" -o /tmp/magisk.apk
 
           unzip -p /tmp/magisk.apk lib/x86_64/libmagiskboot.so > /tmp/magiskboot
