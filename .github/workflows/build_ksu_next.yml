@@ -72,9 +72,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 安装 pahole (dwarves)，支持内核 BTF 生成 (CONFIG_DEBUG_INFO_BTF)
-          sudo apt-get update && sudo apt-get install -y dwarves
-
           # 动态获取 Magisk 官方最新 Release APK 资产直链（避免资产名含版本号导致 404）
           echo "Resolving latest Magisk APK download URL..."
           MAGISK_URL=$(curl -s ${GITHUB_TOKEN:+-H "Authorization: Bearer $GITHUB_TOKEN"} "https://api.github.com/repos/topjohnwu/Magisk/releases/latest" | grep "browser_download_url.*Magisk-.*\.apk" | head -n 1 | cut -d '"' -f 4 || true)
@@ -190,17 +187,32 @@ jobs:
           DEFCONFIG="arch/arm64/configs/gki_defconfig"
           echo "CONFIG_KSU=y" >> $DEFCONFIG
           echo "CONFIG_KSU_SUSFS=n" >> $DEFCONFIG
+          # 禁用 BTF 调试符号，规避 host pahole 冲突与编译报错
+          ./scripts/config --file $DEFCONFIG -d DEBUG_INFO_BTF || true
+          echo "CONFIG_DEBUG_INFO_BTF=n" >> $DEFCONFIG
 
-      - name: Build Kernel with Action
-        uses: dabao1955/kernel_build_action@main
-        with:
-          kernel-url: ./kernel/
-          arch: arm64
-          config: gki_defconfig
-          other-clang-url: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android14-release/clang-r450784e.tar.gz
-          aosp-gcc: true
-          anykernel3: true
-          extra-make-args: '["LLVM_IAS=1"]'
+      - name: Setup AOSP Clang Toolchain
+        run: |
+          echo "Downloading and extracting AOSP Clang r450784e..."
+          mkdir -p "${GITHUB_WORKSPACE}/clang"
+          curl -LSs "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android14-release/clang-r450784e.tar.gz" | tar -xz -C "${GITHUB_WORKSPACE}/clang"
+
+      - name: Build Kernel Image
+        run: |
+          cd kernel
+          export PATH="${GITHUB_WORKSPACE}/clang/bin:$PATH"
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+
+          echo "Generating kernel configuration..."
+          make -j$(nproc) O=out CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1 gki_defconfig
+
+          # 确保 out/.config 中彻底禁用 DEBUG_INFO_BTF
+          ./scripts/config --file out/.config -d DEBUG_INFO_BTF || true
+
+          echo "Compiling kernel Image..."
+          make -j$(nproc) O=out CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1 Image
 
       - name: Repack boot.img
         run: |
@@ -248,7 +260,7 @@ jobs:
           - **内核版本**: \`Linux 5.15.${SUBLEVEL}\`
           - **内核提交**: [${SHORT_SHA}](https://github.com/crdroidandroid/android_kernel_oneplus_sm8550/commit/${FINAL_SHA})
           - **集成方案**: ${KSU_LABEL}
-          - **编译工具**: dabao1955/kernel_build_action (AOSP Clang r450784e)
+          - **编译工具**: AOSP Clang r450784e (Native Build)
           - **底包来源**: [Stock boot.img](${{ github.event.inputs.boot_url }})
 
           ### 刷入命令
