@@ -93,15 +93,24 @@ jobs:
           cd repack
           magiskboot unpack boot.img
 
-          DETECTED_SHA=$(strings kernel | grep -E -o "Linux version 5\.15\.[0-9]+-g[0-9a-f]+" | head -n 1 | sed -E 's/.*-g//')
-          echo "DETECTED_SHA=${DETECTED_SHA}" >> $GITHUB_ENV
-          echo "Detected Commit from boot.img: ${DETECTED_SHA}"
+          # 仅在外部未指定 custom_commit 时，才从原版内核镜像中探测 commit
+          CUSTOM_INPUT="${{ github.event.inputs.custom_commit }}"
+          if [ -z "$CUSTOM_INPUT" ]; then
+            DETECTED_SHA=$(strings kernel | grep -E -o "Linux version 5\.15\.[0-9]+-g[0-9a-f]+" | head -n 1 | sed -E 's/.*-g//')
+            echo "DETECTED_SHA=${DETECTED_SHA}" >> $GITHUB_ENV
+            echo "Auto-detected Commit from boot.img: ${DETECTED_SHA}"
+          else
+            echo "Custom commit provided by user ($CUSTOM_INPUT), skipping boot.img kernel inspection."
+          fi
 
       - name: Fetch Target Kernel Commit
         run: |
           TARGET_COMMIT="${{ github.event.inputs.custom_commit }}"
           if [ -z "$TARGET_COMMIT" ]; then
             TARGET_COMMIT="$DETECTED_SHA"
+            echo "Using auto-detected commit: $TARGET_COMMIT"
+          else
+            echo "Using user-specified commit: $TARGET_COMMIT"
           fi
 
           # 若输入或探测到的是短 SHA（少于 40 位），通过 GitHub API 自动解析为完整 40 位 SHA
@@ -118,6 +127,7 @@ jobs:
 
           mkdir -p kernel && cd kernel
           git init
+          git config advice.detachedHead false
           git remote add origin https://github.com/crdroidandroid/android_kernel_oneplus_sm8550.git
 
           if [ -n "$TARGET_COMMIT" ]; then
@@ -182,9 +192,10 @@ jobs:
           config: gki_defconfig
           aosp-clang: true
           aosp-clang-version: r450784e
+          aosp-gcc: true
           android-version: 13
           anykernel3: true
-          extra-make-args: '["LLVM=1", "LLVM_IAS=1", "CROSS_COMPILE=aarch64-linux-gnu-"]'
+          extra-make-args: '["LLVM=1", "LLVM_IAS=1"]'
 
       - name: Repack boot.img
         run: |
