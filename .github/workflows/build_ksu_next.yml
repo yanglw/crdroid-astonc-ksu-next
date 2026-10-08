@@ -184,6 +184,21 @@ jobs:
           echo "CONFIG_KSU=y" >> $DEFCONFIG
           echo "CONFIG_KSU_SUSFS=n" >> $DEFCONFIG
 
+          # 修复 OPLUS 遗留缺失的 thermal Kconfig 引起的构建中断
+          mkdir -p kernel/oplus_cpu/thermal
+          touch kernel/oplus_cpu/thermal/Kconfig
+          sed -i 's|source "kernel/oplus_cpu/thermal/Kconfig"|# source "kernel/oplus_cpu/thermal/Kconfig"|g' init/Kconfig
+
+          # 扫描并自动桩桩所有可能缺失的外部 source Kconfig，防止任何同类中断
+          grep -rhE '^[[:space:]]*source[[:space:]]+"[^"]+"' . --include="Kconfig*" 2>/dev/null | \
+            sed -E 's/.*source[[:space:]]+"([^"]+)".*/\1/' | sort -u | while read -r kpath; do
+              if [ -n "$kpath" ] && [ ! -f "$kpath" ]; then
+                echo "Creating stub for missing Kconfig: $kpath"
+                mkdir -p "$(dirname "$kpath")"
+                touch "$kpath"
+              fi
+            done
+
       - name: Build Kernel with Action
         uses: dabao1955/kernel_build_action@main
         with:
