@@ -190,12 +190,10 @@ jobs:
           kernel-url: ./kernel/
           arch: arm64
           config: gki_defconfig
-          aosp-clang: true
-          aosp-clang-version: r450784e
+          other-clang-url: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android14-release/clang-r450784e.tar.gz
           aosp-gcc: true
-          android-version: 13
           anykernel3: true
-          extra-make-args: '["LLVM=1", "LLVM_IAS=1"]'
+          extra-make-args: '["LLVM_IAS=1"]'
 
       - name: Repack boot.img
         run: |
