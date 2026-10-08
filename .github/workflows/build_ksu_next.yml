@@ -72,6 +72,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # 安装 pahole (dwarves)，支持内核 BTF 生成 (CONFIG_DEBUG_INFO_BTF)
+          sudo apt-get update && sudo apt-get install -y dwarves
+
           # 动态获取 Magisk 官方最新 Release APK 资产直链（避免资产名含版本号导致 404）
           echo "Resolving latest Magisk APK download URL..."
           MAGISK_URL=$(curl -s ${GITHUB_TOKEN:+-H "Authorization: Bearer $GITHUB_TOKEN"} "https://api.github.com/repos/topjohnwu/Magisk/releases/latest" | grep "browser_download_url.*Magisk-.*\.apk" | head -n 1 | cut -d '"' -f 4 || true)
