@@ -184,7 +184,8 @@ jobs:
           echo "CONFIG_KSU=y" >> $DEFCONFIG
           echo "CONFIG_KSU_SUSFS=n" >> $DEFCONFIG
 
-          # 修复 OPLUS 遗留缺失的 thermal Kconfig 引起的构建中断
+          # 修复 OPLUS 外部模块断链符号链接 (thermal 原为指向 ../../../sm8550-modules/... 的断链)
+          rm -rf kernel/oplus_cpu/thermal
           mkdir -p kernel/oplus_cpu/thermal
           touch kernel/oplus_cpu/thermal/Kconfig
           sed -i 's|source "kernel/oplus_cpu/thermal/Kconfig"|# source "kernel/oplus_cpu/thermal/Kconfig"|g' init/Kconfig
@@ -194,6 +195,7 @@ jobs:
             sed -E 's/.*source[[:space:]]+"([^"]+)".*/\1/' | sort -u | while read -r kpath; do
               if [ -n "$kpath" ] && [ ! -f "$kpath" ]; then
                 echo "Creating stub for missing Kconfig: $kpath"
+                rm -rf "$kpath"
                 mkdir -p "$(dirname "$kpath")"
                 touch "$kpath"
               fi
