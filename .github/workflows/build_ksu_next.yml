@@ -1,0 +1,236 @@
+name: Build crDroid 16.0 Boot (KernelSU / KernelSU-Next)
+
+on:
+  workflow_dispatch:
+    inputs:
+      boot_url:
+        description: 'Direct download URL for stock boot.img (e.g. SourceForge / CDN link)'
+        required: true
+      ksu_variant:
+        description: 'Choose Root Solution'
+        required: true
+        type: choice
+        default: 'KernelSU-Next'
+        options:
+          - 'KernelSU-Next'
+          - 'KernelSU'
+      custom_commit:
+        description: 'Specific Kernel Commit SHA (Leave blank to auto-detect from boot.img)'
+        required: false
+        default: ''
+
+jobs:
+  build:
+    name: Build Kernel & Repack Boot
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Builder Repo
+        uses: actions/checkout@v4
+
+      - name: Maximize Build Space & Install Host Dependencies
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison build-essential ccache curl flex g++-multilib gcc-multilib git \
+            gnupg gperf libelf-dev liblz4-tool libssl-dev libxml2 libxml2-utils lzop pngcrush \
+            rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3 libdw-dev binutils file \
+            gcc-aarch64-linux-gnu libncurses-dev clang lld llvm || true
+
+      - name: Fetch Stock boot.img from URL
+        run: |
+          mkdir -p prebuilt
+          RAW_URL="${{ github.event.inputs.boot_url }}"
+          
+          if [[ "$RAW_URL" == *"sourceforge.net/projects/"* ]]; then
+            CLEAN_URL=$(echo "$RAW_URL" | sed -e 's|sourceforge.net/projects/|downloads.sourceforge.net/project/|' -e 's|/files/|/|' -e 's|/download||')
+          else
+            CLEAN_URL="$RAW_URL"
+          fi
+
+          echo "Downloading boot.img from: $CLEAN_URL"
+          curl -LSs -f -o prebuilt/boot.img "$CLEAN_URL" || \
+          curl -LSs -f -o prebuilt/boot.img "${RAW_URL}?use_mirror=autoselect"
+
+          FILE_INFO=$(file prebuilt/boot.img)
+          echo "File verification: $FILE_INFO"
+          if echo "$FILE_INFO" | grep -qiE "HTML|ASCII text"; then
+            echo "ERROR: Downloaded file is an HTML page rather than a boot image binary."
+            exit 1
+          fi
+
+      - name: Setup Tools & Inspect Stock boot.img
+        run: |
+          # 从 Magisk 官方发布版本直接提取 x86_64 架构的 magiskboot
+          echo "Fetching magiskboot from Magisk release..."
+          curl -LSs -f "https://github.com/topjohnwu/Magisk/releases/latest/download/Magisk.apk" -o /tmp/magisk.apk || \
+          curl -LSs -f "https://github.com/topjohnwu/Magisk/releases/download/v30.7/Magisk-v30.7.apk" -o /tmp/magisk.apk
+
+          unzip -p /tmp/magisk.apk lib/x86_64/libmagiskboot.so > /tmp/magiskboot
+          chmod +x /tmp/magiskboot
+          sudo cp /tmp/magiskboot /usr/local/bin/magiskboot
+          rm -f /tmp/magisk.apk /tmp/magiskboot
+          
+          mkdir -p repack
+          cp prebuilt/boot.img repack/
+          cd repack
+          magiskboot unpack boot.img
+
+          DETECTED_SHA=$(strings kernel | grep -E -o "Linux version 5\.15\.[0-9]+-g[0-9a-f]+" | head -n 1 | sed -E 's/.*-g//')
+          echo "DETECTED_SHA=${DETECTED_SHA}" >> $GITHUB_ENV
+          echo "Detected Commit from boot.img: ${DETECTED_SHA}"
+
+      - name: Fetch Target Kernel Commit
+        run: |
+          TARGET_COMMIT="${{ github.event.inputs.custom_commit }}"
+          if [ -z "$TARGET_COMMIT" ]; then
+            TARGET_COMMIT="$DETECTED_SHA"
+          fi
+
+          # 若输入或探测到的是短 SHA（少于 40 位），通过 GitHub API 自动解析为完整 40 位 SHA
+          if [ -n "$TARGET_COMMIT" ] && [ ${#TARGET_COMMIT} -lt 40 ]; then
+            echo "Resolving full 40-char SHA for short commit: ${TARGET_COMMIT}..."
+            FULL_SHA=$(curl -s -f "https://api.github.com/repos/crdroidandroid/android_kernel_oneplus_sm8550/commits/${TARGET_COMMIT}" | grep -m1 '"sha":' | cut -d '"' -f 4 || true)
+            if [ -n "$FULL_SHA" ] && [ ${#FULL_SHA} -eq 40 ]; then
+              echo "Resolved to full SHA: ${FULL_SHA}"
+              TARGET_COMMIT="$FULL_SHA"
+            else
+              echo "Warning: Could not resolve full SHA via API, using original: ${TARGET_COMMIT}"
+            fi
+          fi
+
+          mkdir -p kernel && cd kernel
+          git init
+          git remote add origin https://github.com/crdroidandroid/android_kernel_oneplus_sm8550.git
+
+          if [ -n "$TARGET_COMMIT" ]; then
+            echo "Fetching target commit: $TARGET_COMMIT"
+            git fetch --depth 1 origin "$TARGET_COMMIT" || {
+              echo "Warning: Failed to fetch target commit. Falling back to latest 16.0 HEAD..."
+              git fetch --depth 1 origin 16.0
+            }
+            git checkout FETCH_HEAD
+          else
+            echo "No commit specified or detected. Fetching latest 16.0 HEAD directly..."
+            git fetch --depth 1 origin 16.0
+            git checkout FETCH_HEAD
+          fi
+
+          FINAL_SHA=$(git rev-parse HEAD)
+          SHORT_SHA=$(echo "${FINAL_SHA}" | cut -c1-12)
+          SUBLEVEL=$(grep "^SUBLEVEL =" Makefile | awk '{print $3}')
+          BUILD_DATE=$(date +'%Y%m%d')
+
+          VARIANT="${{ github.event.inputs.ksu_variant }}"
+          if [ "${VARIANT}" = "KernelSU" ]; then
+            KSU_TAG="ksu"
+          else
+            KSU_TAG="ksu-next"
+          fi
+
+          IMG_NAME="crdroid-16.0-astonc-5.15.${SUBLEVEL}-${SHORT_SHA}-${KSU_TAG}-${BUILD_DATE}.img"
+
+          echo "FINAL_SHA=${FINAL_SHA}" >> $GITHUB_ENV
+          echo "SHORT_SHA=${SHORT_SHA}" >> $GITHUB_ENV
+          echo "SUBLEVEL=${SUBLEVEL}" >> $GITHUB_ENV
+          echo "BUILD_DATE=${BUILD_DATE}" >> $GITHUB_ENV
+          echo "KSU_TAG=${KSU_TAG}" >> $GITHUB_ENV
+          echo "IMG_NAME=${IMG_NAME}" >> $GITHUB_ENV
+
+          echo "Target Image Name: ${IMG_NAME}"
+
+      - name: Inject Root Solution (KernelSU / KernelSU-Next)
+        run: |
+          cd kernel
+          VARIANT="${{ github.event.inputs.ksu_variant }}"
+          echo "Injecting selected root solution: ${VARIANT}"
+
+          if [ "${VARIANT}" = "KernelSU" ]; then
+            curl -LSs -f "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
+            echo "KSU_LABEL=KernelSU (Official main branch)" >> $GITHUB_ENV
+          else
+            curl -LSs -f "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s next
+            echo "KSU_LABEL=KernelSU-Next (Latest next branch)" >> $GITHUB_ENV
+          fi
+          
+          DEFCONFIG="arch/arm64/configs/gki_defconfig"
+          echo "CONFIG_KSU=y" >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS=n" >> $DEFCONFIG
+
+      - name: Build Kernel with Action
+        uses: dabao1955/kernel_build_action@main
+        with:
+          kernel-url: ./kernel/
+          arch: arm64
+          config: gki_defconfig
+          aosp-clang: true
+          aosp-clang-version: r450784e
+          android-version: 13
+          anykernel3: true
+          extra-make-args: '["LLVM=1", "LLVM_IAS=1", "CROSS_COMPILE=aarch64-linux-gnu-"]'
+
+      - name: Repack boot.img
+        run: |
+          # 动态检索编译生成的内核 Image
+          IMAGE_PATH=""
+          if [ -f "kernel/out/arch/arm64/boot/Image" ]; then
+            IMAGE_PATH="kernel/out/arch/arm64/boot/Image"
+          elif [ -f "kernel/arch/arm64/boot/Image" ]; then
+            IMAGE_PATH="kernel/arch/arm64/boot/Image"
+          else
+            IMAGE_PATH=$(find . -name "Image" -type f | head -n 1)
+          fi
+
+          if [ -z "$IMAGE_PATH" ] || [ ! -f "$IMAGE_PATH" ]; then
+            echo "ERROR: Kernel Image binary not found after compilation!"
+            exit 1
+          fi
+
+          echo "Using compiled kernel Image from: $IMAGE_PATH"
+          cp "$IMAGE_PATH" repack/new_image
+          cd repack
+          rm -f kernel
+          mv new_image kernel
+          magiskboot repack boot.img "${IMG_NAME}"
+          cp "${IMG_NAME}" "${GITHUB_WORKSPACE}/${IMG_NAME}"
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.IMG_NAME }}
+          path: ${{ env.IMG_NAME }}
+
+      - name: Publish to GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VARIANT="${{ github.event.inputs.ksu_variant }}"
+          TAG_NAME="v16.0-5.15.${SUBLEVEL}-${SHORT_SHA}-${KSU_TAG}-${BUILD_DATE}"
+          RELEASE_TITLE="crDroid 16.0 (5.15.${SUBLEVEL}-${SHORT_SHA}) ${VARIANT}"
+
+          cat <<EOF > release_notes.md
+          ### 镜像规格
+          - **文件名**: \`${IMG_NAME}\`
+          - **适用设备**: 一加 Ace 3 / 一加 12R (\`astonc\` / \`aston\`)
+          - **内核版本**: \`Linux 5.15.${SUBLEVEL}\`
+          - **内核提交**: [${SHORT_SHA}](https://github.com/crdroidandroid/android_kernel_oneplus_sm8550/commit/${FINAL_SHA})
+          - **集成方案**: ${KSU_LABEL}
+          - **编译工具**: dabao1955/kernel_build_action (AOSP Clang r450784e)
+          - **底包来源**: [Stock boot.img](${{ github.event.inputs.boot_url }})
+
+          ### 刷入命令
+          \`\`\`bash
+          adb reboot bootloader
+          fastboot flash boot ${IMG_NAME}
+          fastboot reboot
+          \`\`\`
+          EOF
+
+          gh release create "${TAG_NAME}" \
+            "${IMG_NAME}" \
+            --title "${RELEASE_TITLE}" \
+            --notes-file release_notes.md || \
+          gh release upload "${TAG_NAME}" "${IMG_NAME}" --clobber
