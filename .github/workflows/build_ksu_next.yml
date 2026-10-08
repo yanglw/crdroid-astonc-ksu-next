@@ -143,6 +143,10 @@ jobs:
             git checkout FETCH_HEAD
           fi
 
+          # 同步拉取配套的外部驱动模块仓库，使内核树中所有相对软链接（如 thermal, kernelFwUpdate, touchscreen 等）天然完整
+          echo "Cloning companion sm8550-modules repository..."
+          git clone --depth 1 -b 16.0 https://github.com/crdroidandroid/android_kernel_oneplus_sm8550-modules.git "${GITHUB_WORKSPACE}/sm8550-modules"
+
           FINAL_SHA=$(git rev-parse HEAD)
           SHORT_SHA=$(echo "${FINAL_SHA}" | cut -c1-12)
           SUBLEVEL=$(grep "^SUBLEVEL =" Makefile | awk '{print $3}')
@@ -183,23 +187,6 @@ jobs:
           DEFCONFIG="arch/arm64/configs/gki_defconfig"
           echo "CONFIG_KSU=y" >> $DEFCONFIG
           echo "CONFIG_KSU_SUSFS=n" >> $DEFCONFIG
-
-          # 修复 OPLUS 外部模块断链符号链接 (thermal 原为指向 ../../../sm8550-modules/... 的断链)
-          rm -rf kernel/oplus_cpu/thermal
-          mkdir -p kernel/oplus_cpu/thermal
-          touch kernel/oplus_cpu/thermal/Kconfig
-          sed -i 's|source "kernel/oplus_cpu/thermal/Kconfig"|# source "kernel/oplus_cpu/thermal/Kconfig"|g' init/Kconfig
-
-          # 扫描并自动桩桩所有可能缺失的外部 source Kconfig，防止任何同类中断
-          grep -rhE '^[[:space:]]*source[[:space:]]+"[^"]+"' . --include="Kconfig*" 2>/dev/null | \
-            sed -E 's/.*source[[:space:]]+"([^"]+)".*/\1/' | sort -u | while read -r kpath; do
-              if [ -n "$kpath" ] && [ ! -f "$kpath" ]; then
-                echo "Creating stub for missing Kconfig: $kpath"
-                rm -rf "$kpath"
-                mkdir -p "$(dirname "$kpath")"
-                touch "$kpath"
-              fi
-            done
 
       - name: Build Kernel with Action
         uses: dabao1955/kernel_build_action@main
