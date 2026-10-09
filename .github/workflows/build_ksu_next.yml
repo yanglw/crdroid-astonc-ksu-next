@@ -103,15 +103,24 @@ jobs:
           cd repack
           magiskboot unpack boot.img
 
-          # 仅在外部未指定 custom_commit 时，才从原版内核镜像中探测 commit
-          CUSTOM_INPUT="${{ github.event.inputs.custom_commit }}"
-          if [ -z "$CUSTOM_INPUT" ]; then
-            DETECTED_SHA=$(strings kernel | grep -E -o "Linux version 5\.15\.[0-9]+-g[0-9a-f]+" | head -n 1 | sed -E 's/.*-g//')
-            echo "DETECTED_SHA=${DETECTED_SHA}" >> $GITHUB_ENV
-            echo "Auto-detected Commit from boot.img: ${DETECTED_SHA}"
-          else
-            echo "Custom commit provided by user ($CUSTOM_INPUT), skipping boot.img kernel inspection."
-          fi
+          # 仅在外部未指定 custom_commit 时，从原版内核镜像中探测 commit 和完整 vermagic
+          KERNEL_VER_LINE=$(strings kernel | grep -m 1 -E "Linux version 5\.15\.[0-9]+" || true)
+          echo "Stock Kernel Banner: ${KERNEL_VER_LINE}"
+
+          # 提取完整 UTS_RELEASE (例如 5.15.137-android14-11-g8a3e9c4b123)
+          STOCK_UTS=$(echo "$KERNEL_VER_LINE" | sed -E -n 's/.*Linux version ([^ ]+).*/\1/p' | head -n 1)
+          echo "Stock UTS_RELEASE: ${STOCK_UTS}"
+          echo "STOCK_UTS=${STOCK_UTS}" >> $GITHUB_ENV
+
+          # 提取 commit sha (即 -g 后的短哈希)
+          AUTO_SHA=$(echo "$STOCK_UTS" | grep -oE -- '-g[0-9a-f]+' | head -n 1 | sed 's/-g//' || true)
+          echo "Auto-detected Commit from boot.img: ${AUTO_SHA}"
+          echo "DETECTED_SHA=${AUTO_SHA}" >> $GITHUB_ENV
+
+          # 提取 5.15.xxx 之后的 SCM 后缀 (例如 -android14-11-g8a3e9c4b123)
+          SCM_SUFFIX=$(echo "$STOCK_UTS" | sed -E 's/^5\.15\.[0-9]+//' || true)
+          echo "Stock SCM Suffix: ${SCM_SUFFIX}"
+          echo "SCM_SUFFIX=${SCM_SUFFIX}" >> $GITHUB_ENV
 
       - name: Fetch Target Kernel Commit
         run: |
@@ -202,11 +211,15 @@ jobs:
           # 禁用 BTF 调试符号，规避 host pahole 冲突与编译报错
           ./scripts/config --file $DEFCONFIG -d DEBUG_INFO_BTF || true
           echo "CONFIG_DEBUG_INFO_BTF=n" >> $DEFCONFIG
-          # 禁用 LTO，规避 GitHub Actions 7GB 物理内存超限导致的 OOM Terminated
-          ./scripts/config --file $DEFCONFIG -d LTO_CLANG -d LTO_CLANG_FULL -d LTO_CLANG_THIN -e LTO_NONE || true
-          echo "CONFIG_LTO_NONE=y" >> $DEFCONFIG
-          echo "CONFIG_LTO_CLANG_FULL=n" >> $DEFCONFIG
-          echo "CONFIG_LTO_CLANG_THIN=n" >> $DEFCONFIG
+          # 注入 .scmversion，防止源码树 dirty 导致 uname -r 产生 -dirty 尾缀，并完全对齐底包的 vermagic
+          if [ -n "$SCM_SUFFIX" ]; then
+            echo "Applying exact stock SCM suffix to .scmversion: ${SCM_SUFFIX}"
+            echo -n "${SCM_SUFFIX}" > .scmversion
+          else
+            touch .scmversion
+          fi
+          # 保持 ThinLTO 与 CFI（GKI 官方规范，与系统 vendor_dlkm 模块 ABI/签名完全一致，避免开机死机重启）
+          ./scripts/config --file $DEFCONFIG -d LTO_NONE -d LTO_CLANG_FULL -e LTO_CLANG_THIN -e CFI_CLANG || true
           # 禁用 oplus 传感器配置内置进 vmlinux
           ./scripts/config --file $DEFCONFIG -d OPLUS_FEATURE_SENSOR_CFG || true
           echo "CONFIG_OPLUS_FEATURE_SENSOR_CFG=n" >> $DEFCONFIG
@@ -228,12 +241,21 @@ jobs:
           echo "Generating kernel configuration..."
           make -j$(nproc) O=out CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1 gki_defconfig
 
-          # 确保 out/.config 中彻底禁用 DEBUG_INFO_BTF, LTO 与外部模块内置
-          ./scripts/config --file out/.config -d DEBUG_INFO_BTF -d LTO_CLANG -d LTO_CLANG_FULL -d LTO_CLANG_THIN -e LTO_NONE -d OPLUS_FEATURE_SENSOR_CFG || true
+          # 确保 out/.config 中启用 ThinLTO + CFI，禁用 BTF 与外部模块内置
+          ./scripts/config --file out/.config -d DEBUG_INFO_BTF -d LTO_NONE -d LTO_CLANG_FULL -e LTO_CLANG_THIN -e CFI_CLANG -d OPLUS_FEATURE_SENSOR_CFG || true
           make -j$(nproc) O=out CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1 olddefconfig
 
-          echo "Compiling kernel Image..."
-          make -j$(nproc) O=out CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1 Image
+          # 确保 .scmversion 在源码根目录与 out 目录下均生效
+          if [ -n "$SCM_SUFFIX" ]; then
+            echo -n "${SCM_SUFFIX}" > .scmversion
+            echo -n "${SCM_SUFFIX}" > out/.scmversion
+          else
+            touch .scmversion
+            touch out/.scmversion
+          fi
+
+          echo "Compiling kernel Image with ThinLTO (2 parallel jobs to optimize RAM)..."
+          make -j$(nproc) O=out CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1 KBUILD_LDFLAGS="--thinlto-jobs=2" Image
 
       - name: Repack boot.img
         run: |
