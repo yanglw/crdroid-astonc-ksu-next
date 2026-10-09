@@ -204,13 +204,6 @@ jobs:
             curl -LSs -f "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s next
             echo "KSU_LABEL=KernelSU-Next (Latest next branch)" >> $GITHUB_ENV
           fi
-          
-          DEFCONFIG="arch/arm64/configs/gki_defconfig"
-          echo "CONFIG_KSU=y" >> $DEFCONFIG
-          echo "CONFIG_KSU_SUSFS=n" >> $DEFCONFIG
-          # 禁用 BTF 调试符号，规避 host pahole 冲突与编译报错
-          ./scripts/config --file $DEFCONFIG -d DEBUG_INFO_BTF || true
-          echo "CONFIG_DEBUG_INFO_BTF=n" >> $DEFCONFIG
           # 注入 .scmversion，防止源码树 dirty 导致 uname -r 产生 -dirty 尾缀，并完全对齐底包的 vermagic
           if [ -n "$SCM_SUFFIX" ]; then
             echo "Applying exact stock SCM suffix to .scmversion: ${SCM_SUFFIX}"
@@ -218,11 +211,16 @@ jobs:
           else
             touch .scmversion
           fi
-          # 保持 ThinLTO 与 CFI（GKI 官方规范，与系统 vendor_dlkm 模块 ABI/签名完全一致，避免开机死机重启）
-          ./scripts/config --file $DEFCONFIG -d LTO_NONE -d LTO_CLANG_FULL -e LTO_CLANG_THIN -e CFI_CLANG || true
-          # 禁用 oplus 传感器配置内置进 vmlinux
-          ./scripts/config --file $DEFCONFIG -d OPLUS_FEATURE_SENSOR_CFG || true
-          echo "CONFIG_OPLUS_FEATURE_SENSOR_CFG=n" >> $DEFCONFIG
+
+          # 生成自定义 KSU 补丁配置碎片
+          cat << 'EOF' > arch/arm64/configs/ksu.config
+          CONFIG_KSU=y
+          CONFIG_KSU_SUSFS=n
+          CONFIG_DEBUG_INFO_BTF=n
+          CONFIG_LTO_CLANG_THIN=y
+          CONFIG_CFI_CLANG=y
+          CONFIG_OPLUS_FEATURE_SENSOR_CFG=n
+          EOF
 
       - name: Setup AOSP Clang Toolchain (clang-r563880c via NDK r29)
         run: |
@@ -243,12 +241,33 @@ jobs:
           export SUBARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
 
-          echo "Generating kernel configuration..."
-          make -j$(nproc) O=out CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1 gki_defconfig
+          echo "Preparing config fragments for SM8550 (Kalama + Oplus + GKI)..."
+          # 清理 vendor/oplus/kalama_GKI.config 中非标准 Kconfig 的 C 预编译宏与非键值行
+          if [ -f "arch/arm64/configs/vendor/oplus/kalama_GKI.config" ]; then
+            grep -E '^CONFIG_[A-Za-z0-9_]+=[ymn]' arch/arm64/configs/vendor/oplus/kalama_GKI.config > arch/arm64/configs/vendor/oplus/kalama_clean.config || true
+          fi
 
-          # 确保 out/.config 中启用 ThinLTO + CFI，禁用 BTF 与外部模块内置
+          CONFIG_LIST=(
+            arch/arm64/configs/gki_defconfig
+          )
+          [ -f "arch/arm64/configs/vendor/kalama_GKI.config" ] && CONFIG_LIST+=(arch/arm64/configs/vendor/kalama_GKI.config)
+          [ -f "arch/arm64/configs/vendor/oplus/kalama_clean.config" ] && CONFIG_LIST+=(arch/arm64/configs/vendor/oplus/kalama_clean.config)
+          [ -f "arch/arm64/configs/vendor/debugfs.config" ] && CONFIG_LIST+=(arch/arm64/configs/vendor/debugfs.config)
+          [ -f "arch/arm64/configs/ksu.config" ] && CONFIG_LIST+=(arch/arm64/configs/ksu.config)
+
+          echo "Merging config list: ${CONFIG_LIST[*]}"
+          mkdir -p out
+          ./scripts/kconfig/merge_config.sh -m -O out "${CONFIG_LIST[@]}"
+
+          echo "Resolving dependencies with olddefconfig..."
+          make -j$(nproc) O=out CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1 olddefconfig
+
+          # 确保关键安全和构建参数锁死（ThinLTO, CFI, 禁用 BTF 与传感器内联）
           ./scripts/config --file out/.config -d DEBUG_INFO_BTF -d LTO_NONE -d LTO_CLANG_FULL -e LTO_CLANG_THIN -e CFI_CLANG -d OPLUS_FEATURE_SENSOR_CFG || true
           make -j$(nproc) O=out CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1 olddefconfig
+
+          echo "Verifying crucial config flags in out/.config:"
+          grep -E "CONFIG_ARCH_KALAMA|CONFIG_ARCH_QCOM|CONFIG_KSU|CONFIG_LTO_CLANG_THIN|CONFIG_CFI_CLANG|CONFIG_DEBUG_INFO_BTF" out/.config || true
 
           # 确保 .scmversion 在源码根目录与 out 目录下均生效
           if [ -n "$SCM_SUFFIX" ]; then
@@ -314,8 +333,8 @@ jobs:
           ### 刷入命令
           \`\`\`bash
           adb reboot bootloader
-          # 若此前遇到开机卡 Logo，可先禁用 AVB 校验（vbmeta.img 从 ROM 包提取）：
-          # fastboot flash vbmeta --disable-verity --disable-verification vbmeta.img
+          # 若此前启动重试次数耗尽导致卡 Logo，可先重置槽位：
+          # fastboot --set-active=b
           fastboot flash boot ${IMG_NAME}
           fastboot reboot
           \`\`\`
