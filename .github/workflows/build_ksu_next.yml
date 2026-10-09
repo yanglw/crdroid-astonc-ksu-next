@@ -34,13 +34,14 @@ jobs:
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost
           
-          # 释放系统原有占用的 Swap 文件并重新创建 10GB Swap，避免 Text file busy 报错
+          # 创建 24GB Swap 满足 Full LTO 编译内存需求
           sudo swapoff -a || true
           sudo rm -f /swapfile
-          sudo fallocate -l 10G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=10240
+          sudo fallocate -l 24G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=24576
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
+          echo 100 | sudo tee /proc/sys/vm/swappiness || true
           free -h
 
           sudo apt-get update
@@ -48,7 +49,7 @@ jobs:
             bc bison build-essential ccache curl flex g++-multilib gcc-multilib git \
             gnupg gperf libelf-dev liblz4-tool libssl-dev libxml2 libxml2-utils lzop pngcrush \
             rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3 libdw-dev binutils file \
-            gcc-aarch64-linux-gnu libncurses-dev clang lld llvm || true
+            gcc-aarch64-linux-gnu libncurses-dev clang lld llvm dwarves || true
 
       - name: Fetch Stock boot.img from URL
         run: |
@@ -122,6 +123,33 @@ jobs:
           echo "Stock SCM Suffix: ${SCM_SUFFIX}"
           echo "SCM_SUFFIX=${SCM_SUFFIX}" >> $GITHUB_ENV
 
+          # 自动从底包内核二进制中逆向提取 100% 真实的 IKCONFIG
+          echo "Scanning for embedded IKCONFIG in stock kernel binary..."
+          mkdir -p "${GITHUB_WORKSPACE}/configs"
+          python3 -c "
+          import gzip
+          data = open('kernel', 'rb').read()
+          magic = b'IKCFG_ST\x1f\x8b\x08'
+          pos = data.find(magic)
+          if pos != -1:
+              cfg = gzip.decompress(data[pos+8:])
+              open('${GITHUB_WORKSPACE}/configs/extracted.config', 'wb').write(cfg)
+              print(f'Successfully extracted embedded IKCONFIG ({len(cfg)} bytes)!')
+          else:
+              print('IKCONFIG magic not found in kernel binary')
+          " || true
+
+          if [ -s "${GITHUB_WORKSPACE}/configs/extracted.config" ]; then
+            echo "Using automatically extracted exact stock config."
+            cp "${GITHUB_WORKSPACE}/configs/extracted.config" "${GITHUB_WORKSPACE}/configs/active_stock.config"
+          elif [ -f "${GITHUB_WORKSPACE}/configs/astonc_5.15.211.config" ]; then
+            echo "Using bundled official stock config from repository."
+            cp "${GITHUB_WORKSPACE}/configs/astonc_5.15.211.config" "${GITHUB_WORKSPACE}/configs/active_stock.config"
+          else
+            echo "ERROR: No valid stock configuration found!"
+            exit 1
+          fi
+
       - name: Fetch Target Kernel Commit
         run: |
           TARGET_COMMIT="${{ github.event.inputs.custom_commit }}"
@@ -162,11 +190,29 @@ jobs:
             git checkout FETCH_HEAD
           fi
 
-          # 同步拉取配套的外部驱动模块仓库，使内核树中所有相对软链接（如 thermal, kernelFwUpdate, touchscreen 等）天然完整
+          # 同步拉取配套的外部驱动模块仓库，并精确映射 18 个 Oplus 专有硬件驱动目录
           echo "Cloning companion sm8550-modules repository..."
           git clone --depth 1 -b 16.0 https://github.com/crdroidandroid/android_kernel_oneplus_sm8550-modules.git "${GITHUB_WORKSPACE}/sm8550-modules"
-          # 修复 sm8550-modules 中驱动错误声明 default y 导致被错误内联进 vmlinux 引发 undefined symbol (qcom_smem_alloc / get_project)
-          find "${GITHUB_WORKSPACE}/sm8550-modules" -name "Kconfig" -exec sed -i -E 's/default[[:space:]]+y/default n/g' {} + || true
+          MROOT="${GITHUB_WORKSPACE}/sm8550-modules"
+          mkdir -p drivers/soc/oplus kernel/oplus_cpu
+          ln -sfn "$MROOT/oplus/kernel/cpu/thermal"                                   kernel/oplus_cpu/thermal
+          ln -sfn "$MROOT/oplus/kernel/touchpanel/kernelFwUpdate"                    drivers/base/kernelFwUpdate
+          ln -sfn "$MROOT/oplus/kernel/touchpanel/oplus_touchscreen_v2"              drivers/input/touchscreen/oplus_touchscreen_v2
+          ln -sfn "$MROOT/oplus/kernel/touchpanel/synaptics_hbp"                     drivers/input/touchscreen/synaptics_hbp
+          ln -sfn "$MROOT/oplus/kernel/touchpanel/oplus_touchscreen_v2/touch_custom" drivers/input/touchscreen/touch_custom
+          ln -sfn "$MROOT/oplus/secure/biometrics/fingerprints/bsp/uff/driver"       drivers/input/uff_fp_drivers
+          ln -sfn "$MROOT/oplus/kernel/leds/aw210xx"                                 drivers/leds/aw210xx
+          ln -sfn "$MROOT/oplus/kernel/vibrator/aw8697_haptic"                       drivers/misc/aw8697_haptic
+          ln -sfn "$MROOT/oplus/kernel/device_info/tri_state_key"                    drivers/misc/tri_state_key
+          ln -sfn "$MROOT/oplus/secure/common/bsp/drivers"                           drivers/misc/oplus_secure
+          ln -sfn "$MROOT/oplus/kernel/nfc"                                          drivers/nfc/oplus_nfc
+          ln -sfn "$MROOT/oplus/kernel/charger"                                      drivers/power/oplus
+          ln -sfn "$MROOT/oplus/kernel/boot"                                         drivers/soc/oplus/boot
+          ln -sfn "$MROOT/oplus/kernel/device_info/device_info"                      drivers/soc/oplus/device_info
+          ln -sfn "$MROOT/oplus/kernel/dfr"                                          drivers/soc/oplus/dfr
+          ln -sfn "$MROOT/oplus/kernel/dft"                                          drivers/soc/oplus/dft
+          ln -sfn "$MROOT/oplus/sensor/kernel/oplus_consumer_ir"                     drivers/soc/oplus/oplus_consumer_ir
+          ln -sfn "$MROOT/oplus/sensor/kernel/qcom/sensor"                           drivers/soc/oplus/sensor
 
           FINAL_SHA=$(git rev-parse HEAD)
           SHORT_SHA=$(echo "${FINAL_SHA}" | cut -c1-12)
@@ -212,16 +258,6 @@ jobs:
             touch .scmversion
           fi
 
-          # 生成自定义 KSU 补丁配置碎片
-          cat << 'EOF' > arch/arm64/configs/ksu.config
-          CONFIG_KSU=y
-          CONFIG_KSU_SUSFS=n
-          CONFIG_DEBUG_INFO_BTF=n
-          CONFIG_LTO_CLANG_THIN=y
-          CONFIG_CFI_CLANG=y
-          CONFIG_OPLUS_FEATURE_SENSOR_CFG=n
-          EOF
-
       - name: Setup AOSP Clang Toolchain (clang-r563880c via NDK r29)
         run: |
           echo "Downloading official Clang r563880c (Clang 21) from Google CDN..."
@@ -241,33 +277,17 @@ jobs:
           export SUBARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
 
-          echo "Preparing config fragments for SM8550 (Kalama + Oplus + GKI)..."
-          # 清理 vendor/oplus/kalama_GKI.config 中非标准 Kconfig 的 C 预编译宏与非键值行
-          if [ -f "arch/arm64/configs/vendor/oplus/kalama_GKI.config" ]; then
-            grep -E '^CONFIG_[A-Za-z0-9_]+=[ymn]' arch/arm64/configs/vendor/oplus/kalama_GKI.config > arch/arm64/configs/vendor/oplus/kalama_clean.config || true
-          fi
-
-          CONFIG_LIST=(
-            arch/arm64/configs/gki_defconfig
-          )
-          [ -f "arch/arm64/configs/vendor/kalama_GKI.config" ] && CONFIG_LIST+=(arch/arm64/configs/vendor/kalama_GKI.config)
-          [ -f "arch/arm64/configs/vendor/oplus/kalama_clean.config" ] && CONFIG_LIST+=(arch/arm64/configs/vendor/oplus/kalama_clean.config)
-          [ -f "arch/arm64/configs/vendor/debugfs.config" ] && CONFIG_LIST+=(arch/arm64/configs/vendor/debugfs.config)
-          [ -f "arch/arm64/configs/ksu.config" ] && CONFIG_LIST+=(arch/arm64/configs/ksu.config)
-
-          echo "Merging config list: ${CONFIG_LIST[*]}"
+          echo "Configuring kernel with 100% exact stock base..."
           mkdir -p out
-          ./scripts/kconfig/merge_config.sh -m -O out "${CONFIG_LIST[@]}"
+          cp "${GITHUB_WORKSPACE}/configs/active_stock.config" out/.config
 
-          echo "Resolving dependencies with olddefconfig..."
-          make -j$(nproc) O=out CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1 olddefconfig
-
-          # 确保关键安全和构建参数锁死（ThinLTO, CFI, 禁用 BTF 与传感器内联）
-          ./scripts/config --file out/.config -d DEBUG_INFO_BTF -d LTO_NONE -d LTO_CLANG_FULL -e LTO_CLANG_THIN -e CFI_CLANG -d OPLUS_FEATURE_SENSOR_CFG || true
+          # 注入 KSU 配置与禁用 BTF（节约链接内存与构建时间）
+          echo "Injecting KSU configuration..."
+          ./scripts/config --file out/.config -e KSU -d KSU_SUSFS -d DEBUG_INFO_BTF
           make -j$(nproc) O=out CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1 olddefconfig
 
           echo "Verifying crucial config flags in out/.config:"
-          grep -E "CONFIG_ARCH_KALAMA|CONFIG_ARCH_QCOM|CONFIG_KSU|CONFIG_LTO_CLANG_THIN|CONFIG_CFI_CLANG|CONFIG_DEBUG_INFO_BTF" out/.config || true
+          grep -E "CONFIG_ARCH_KALAMA|CONFIG_ARCH_QCOM|CONFIG_KSU|CONFIG_LTO_CLANG_FULL|CONFIG_CFI_CLANG|CONFIG_DEBUG_INFO_BTF" out/.config || true
 
           # 确保 .scmversion 在源码根目录与 out 目录下均生效
           if [ -n "$SCM_SUFFIX" ]; then
@@ -278,8 +298,8 @@ jobs:
             touch out/.scmversion
           fi
 
-          echo "Compiling kernel Image with ThinLTO (2 parallel jobs to optimize RAM)..."
-          make -j$(nproc) O=out CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1 KBUILD_LDFLAGS="--thinlto-jobs=2" Image
+          echo "Compiling kernel Image (Full LTO matching stock crDroid)..."
+          make -j$(nproc) O=out CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1 Image
 
       - name: Repack boot.img
         run: |
@@ -306,11 +326,26 @@ jobs:
           magiskboot repack boot.img "${IMG_NAME}"
           cp "${IMG_NAME}" "${GITHUB_WORKSPACE}/${IMG_NAME}"
 
-      - name: Upload Artifact
+      - name: Package AnyKernel3 Flashable ZIP
+        run: |
+          cd "${GITHUB_WORKSPACE}"
+          echo "Cloning AnyKernel3 template for OnePlus Ace 3 (aston)..."
+          git clone --depth 1 https://github.com/OnePlusACE3-development/AnyKernel3-aston AnyKernel3 || \
+            git clone --depth 1 https://github.com/osm0sis/AnyKernel3 AnyKernel3
+          rm -rf AnyKernel3/.git
+          cp "kernel/out/arch/arm64/boot/Image" AnyKernel3/Image
+          AK3_NAME="crdroid-16.0-astonc-5.15.${SUBLEVEL}-${SHORT_SHA}-${KSU_TAG}-${BUILD_DATE}-AK3.zip"
+          ( cd AnyKernel3 && zip -r9 "../${AK3_NAME}" . -x '.git*' 'README.md' )
+          echo "AK3_NAME=${AK3_NAME}" >> $GITHUB_ENV
+          echo "Successfully packaged AnyKernel3: ${AK3_NAME}"
+
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.IMG_NAME }}
-          path: ${{ env.IMG_NAME }}
+          name: ${{ env.IMG_NAME }}-artifacts
+          path: |
+            ${{ env.IMG_NAME }}
+            ${{ env.AK3_NAME }}
 
       - name: Publish to GitHub Release
         env:
@@ -322,26 +357,41 @@ jobs:
 
           cat <<EOF > release_notes.md
           ### 镜像规格
-          - **文件名**: \`${IMG_NAME}\`
+          - **boot 镜像**: \`${IMG_NAME}\`
+          - **AnyKernel3 刷机包**: \`${AK3_NAME}\`
           - **适用设备**: 一加 Ace 3 / 一加 12R (\`astonc\` / \`aston\`)
           - **内核版本**: \`Linux 5.15.${SUBLEVEL}\`
           - **内核提交**: [${SHORT_SHA}](https://github.com/crdroidandroid/android_kernel_oneplus_sm8550/commit/${FINAL_SHA})
+          - **配置基准**: 底包官方 100% 原始 \`.config\` 提取（Full LTO + CFI 原生对齐）
           - **集成方案**: ${KSU_LABEL}
           - **编译工具**: AOSP Clang r563880c (Clang 21.0.0 Native Build)
           - **底包来源**: [Stock boot.img](${{ github.event.inputs.boot_url }})
 
-          ### 刷入命令
+          ---
+
+          ### 刷入方式（双方案任选）
+
+          #### 方案 A：crDroid Recovery 中卡刷 / Sideload（强烈推荐，100% 绕过 fastboot AVB 限制）
+          1. 手机进入 Recovery 模式（关机状态长按 **音量减 + 电源键**）。
+          2. 选择 **Apply update** -> **Apply from ADB**。
+          3. 电脑端执行刷入命令：
+             \`\`\`bash
+             adb sideload ${AK3_NAME}
+             \`\`\`
+          4. 刷完后直接点击 **Reboot system now** 开机！
+
+          #### 方案 B：Fastboot 线刷 boot.img
           \`\`\`bash
           adb reboot bootloader
-          # 若此前启动重试次数耗尽导致卡 Logo，可先重置槽位：
-          # fastboot --set-active=b
+          # 若此前启动重试次数耗尽，可先重置槽位：
+          fastboot --set-active=b
           fastboot flash boot ${IMG_NAME}
           fastboot reboot
           \`\`\`
           EOF
 
           gh release create "${TAG_NAME}" \
-            "${IMG_NAME}" \
+            "${IMG_NAME}" "${AK3_NAME}" \
             --title "${RELEASE_TITLE}" \
             --notes-file release_notes.md || \
-          gh release upload "${TAG_NAME}" "${IMG_NAME}" --clobber
+          gh release upload "${TAG_NAME}" "${IMG_NAME}" "${AK3_NAME}" --clobber
