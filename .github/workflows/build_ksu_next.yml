@@ -156,6 +156,8 @@ jobs:
           # 同步拉取配套的外部驱动模块仓库，使内核树中所有相对软链接（如 thermal, kernelFwUpdate, touchscreen 等）天然完整
           echo "Cloning companion sm8550-modules repository..."
           git clone --depth 1 -b 16.0 https://github.com/crdroidandroid/android_kernel_oneplus_sm8550-modules.git "${GITHUB_WORKSPACE}/sm8550-modules"
+          # 修复 sm8550-modules 中驱动错误声明 default y 导致被错误内联进 vmlinux 引发 undefined symbol (qcom_smem_alloc / get_project)
+          find "${GITHUB_WORKSPACE}/sm8550-modules" -name "Kconfig" -exec sed -i -E 's/default[[:space:]]+y/default n/g' {} + || true
 
           FINAL_SHA=$(git rev-parse HEAD)
           SHORT_SHA=$(echo "${FINAL_SHA}" | cut -c1-12)
@@ -205,6 +207,9 @@ jobs:
           echo "CONFIG_LTO_NONE=y" >> $DEFCONFIG
           echo "CONFIG_LTO_CLANG_FULL=n" >> $DEFCONFIG
           echo "CONFIG_LTO_CLANG_THIN=n" >> $DEFCONFIG
+          # 禁用 oplus 传感器配置内置进 vmlinux
+          ./scripts/config --file $DEFCONFIG -d OPLUS_FEATURE_SENSOR_CFG || true
+          echo "CONFIG_OPLUS_FEATURE_SENSOR_CFG=n" >> $DEFCONFIG
 
       - name: Setup AOSP Clang Toolchain
         run: |
@@ -223,8 +228,8 @@ jobs:
           echo "Generating kernel configuration..."
           make -j$(nproc) O=out CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1 gki_defconfig
 
-          # 确保 out/.config 中彻底禁用 DEBUG_INFO_BTF 与 LTO
-          ./scripts/config --file out/.config -d DEBUG_INFO_BTF -d LTO_CLANG -d LTO_CLANG_FULL -d LTO_CLANG_THIN -e LTO_NONE || true
+          # 确保 out/.config 中彻底禁用 DEBUG_INFO_BTF, LTO 与外部模块内置
+          ./scripts/config --file out/.config -d DEBUG_INFO_BTF -d LTO_CLANG -d LTO_CLANG_FULL -d LTO_CLANG_THIN -e LTO_NONE -d OPLUS_FEATURE_SENSOR_CFG || true
           make -j$(nproc) O=out CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1 olddefconfig
 
           echo "Compiling kernel Image..."
