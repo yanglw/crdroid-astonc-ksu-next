@@ -34,7 +34,9 @@ jobs:
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost
           
-          # 创建 10GB Swap 虚拟内存，避免 LTO/大链接过程物理内存不足触发 OOM Killer
+          # 释放系统原有占用的 Swap 文件并重新创建 10GB Swap，避免 Text file busy 报错
+          sudo swapoff -a || true
+          sudo rm -f /swapfile
           sudo fallocate -l 10G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=10240
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
