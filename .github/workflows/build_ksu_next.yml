@@ -226,9 +226,12 @@ jobs:
 
       - name: Setup AOSP Clang Toolchain
         run: |
-          echo "Downloading and extracting AOSP Clang r450784e..."
+          echo "Downloading and extracting AOSP Clang r563880c (Clang 21 for Android 16)..."
           mkdir -p "${GITHUB_WORKSPACE}/clang"
-          curl -LSs "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android14-release/clang-r450784e.tar.gz" | tar -xz -C "${GITHUB_WORKSPACE}/clang"
+          curl -LSs -f "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/b5f16aee7b8af4c339972027e91e7e793c2e55d9/clang-r563880c.tar.gz" -o /tmp/clang.tar.gz
+          tar -xzf /tmp/clang.tar.gz -C "${GITHUB_WORKSPACE}/clang"
+          rm -f /tmp/clang.tar.gz
+          "${GITHUB_WORKSPACE}/clang/bin/clang" --version
 
       - name: Build Kernel Image
         run: |
@@ -303,12 +306,14 @@ jobs:
           - **内核版本**: \`Linux 5.15.${SUBLEVEL}\`
           - **内核提交**: [${SHORT_SHA}](https://github.com/crdroidandroid/android_kernel_oneplus_sm8550/commit/${FINAL_SHA})
           - **集成方案**: ${KSU_LABEL}
-          - **编译工具**: AOSP Clang r450784e (Native Build)
+          - **编译工具**: AOSP Clang r563880c (Clang 21.0.0 Native Build)
           - **底包来源**: [Stock boot.img](${{ github.event.inputs.boot_url }})
 
           ### 刷入命令
           \`\`\`bash
           adb reboot bootloader
+          # 若此前遇到开机卡 Logo，可先禁用 AVB 校验（vbmeta.img 从 ROM 包提取）：
+          # fastboot flash vbmeta --disable-verity --disable-verification vbmeta.img
           fastboot flash boot ${IMG_NAME}
           fastboot reboot
           \`\`\`
