@@ -127,26 +127,28 @@ jobs:
           echo "Scanning for embedded IKCONFIG in stock kernel binary..."
           mkdir -p "${GITHUB_WORKSPACE}/configs"
           python3 -c "
-          import gzip
           data = open('kernel', 'rb').read()
-          magic = b'IKCFG_ST\x1f\x8b\x08'
+          # 准确匹配 IKCFG_ST 紧随其后的 gzip 头魔数 0x1F 0x8B (避免误匹配 .rodata 中的常量字符)
+          magic = bytes([0x49, 0x4B, 0x43, 0x46, 0x47, 0x5F, 0x53, 0x54, 0x1F, 0x8B])
           pos = data.find(magic)
           if pos != -1:
-              cfg = gzip.decompress(data[pos+8:])
-              open('${GITHUB_WORKSPACE}/configs/extracted.config', 'wb').write(cfg)
-              print(f'Successfully extracted embedded IKCONFIG ({len(cfg)} bytes)!')
+              print(f'Found embedded IKCONFIG stream at offset: {pos}')
+              with open('raw_config.gz', 'wb') as f:
+                  f.write(data[pos+8:])
           else:
               print('IKCONFIG magic not found in kernel binary')
           " || true
 
+          if [ -f "raw_config.gz" ]; then
+            zcat raw_config.gz > "${GITHUB_WORKSPACE}/configs/extracted.config" 2>/dev/null || \
+            gzip -dc raw_config.gz > "${GITHUB_WORKSPACE}/configs/extracted.config" 2>/dev/null || true
+          fi
+
           if [ -s "${GITHUB_WORKSPACE}/configs/extracted.config" ]; then
-            echo "Using automatically extracted exact stock config."
+            echo "Successfully extracted $(wc -l < ${GITHUB_WORKSPACE}/configs/extracted.config) lines of exact stock config from boot.img."
             cp "${GITHUB_WORKSPACE}/configs/extracted.config" "${GITHUB_WORKSPACE}/configs/active_stock.config"
-          elif [ -f "${GITHUB_WORKSPACE}/configs/astonc_5.15.211.config" ]; then
-            echo "Using bundled official stock config from repository."
-            cp "${GITHUB_WORKSPACE}/configs/astonc_5.15.211.config" "${GITHUB_WORKSPACE}/configs/active_stock.config"
           else
-            echo "ERROR: No valid stock configuration found!"
+            echo "ERROR: Failed to extract stock configuration from boot.img!"
             exit 1
           fi
 
