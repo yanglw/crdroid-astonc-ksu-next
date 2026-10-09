@@ -14,6 +14,7 @@ on:
         options:
           - 'KernelSU-Next'
           - 'KernelSU'
+          - 'None (Pure Stock)'
       custom_commit:
         description: 'Specific Kernel Commit SHA (Leave blank to auto-detect from boot.img)'
         required: false
@@ -224,8 +225,10 @@ jobs:
           VARIANT="${{ github.event.inputs.ksu_variant }}"
           if [ "${VARIANT}" = "KernelSU" ]; then
             KSU_TAG="ksu"
-          else
+          elif [ "${VARIANT}" = "KernelSU-Next" ]; then
             KSU_TAG="ksu-next"
+          else
+            KSU_TAG="stock"
           fi
 
           IMG_NAME="crdroid-16.0-astonc-5.15.${SUBLEVEL}-${SHORT_SHA}-${KSU_TAG}-${BUILD_DATE}.img"
@@ -248,9 +251,12 @@ jobs:
           if [ "${VARIANT}" = "KernelSU" ]; then
             curl -LSs -f "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
             echo "KSU_LABEL=KernelSU (Official main branch)" >> $GITHUB_ENV
-          else
+          elif [ "${VARIANT}" = "KernelSU-Next" ]; then
             curl -LSs -f "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s next
             echo "KSU_LABEL=KernelSU-Next (Latest next branch)" >> $GITHUB_ENV
+          else
+            echo "Skipping KSU injection (Building Pure Stock Kernel)"
+            echo "KSU_LABEL=Pure Stock Baseline (No Root)" >> $GITHUB_ENV
           fi
           # 注入 .scmversion，防止源码树 dirty 导致 uname -r 产生 -dirty 尾缀，并完全对齐底包的 vermagic
           if [ -n "$SCM_SUFFIX" ]; then
@@ -283,9 +289,18 @@ jobs:
           mkdir -p out
           cp "${GITHUB_WORKSPACE}/configs/active_stock.config" out/.config
 
-          # 注入 KSU 配置与禁用 BTF（节约链接内存与构建时间）
-          echo "Injecting KSU configuration..."
-          ./scripts/config --file out/.config -e KSU -d KSU_SUSFS -d DEBUG_INFO_BTF
+          VARIANT="${{ github.event.inputs.ksu_variant }}"
+          if [ "${VARIANT}" != "None (Pure Stock)" ]; then
+            echo "Injecting KSU configuration into .config..."
+            ./scripts/config --file out/.config -e KSU -d KSU_SUSFS
+          else
+            echo "Pure stock baseline selected, leaving KSU untouched."
+          fi
+
+          # 注意：绝不禁用 DEBUG_INFO_BTF！Android 14+ / crDroid 16.0 的 bpfloader 严格依赖 /sys/kernel/btf/vmlinux
+          # pahole 必须处于可用状态以生成 BTF 符号
+          pahole --version || true
+
           make -j$(nproc) O=out CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1 olddefconfig
 
           echo "Verifying crucial config flags in out/.config:"
