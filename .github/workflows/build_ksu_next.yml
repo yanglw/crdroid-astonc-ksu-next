@@ -224,13 +224,15 @@ jobs:
           ./scripts/config --file $DEFCONFIG -d OPLUS_FEATURE_SENSOR_CFG || true
           echo "CONFIG_OPLUS_FEATURE_SENSOR_CFG=n" >> $DEFCONFIG
 
-      - name: Setup AOSP Clang Toolchain
+      - name: Setup AOSP Clang Toolchain (clang-r563880c via NDK r29)
         run: |
-          echo "Downloading and extracting AOSP Clang r563880c (Clang 21 for Android 16)..."
+          echo "Downloading official Clang r563880c (Clang 21) from Google CDN..."
+          curl -LSs -f -o /tmp/ndk.zip "https://dl.google.com/android/repository/android-ndk-r29-linux.zip"
+          echo "Extracting LLVM toolchain..."
+          unzip -q /tmp/ndk.zip "android-ndk-r29/toolchains/llvm/prebuilt/linux-x86_64/*" -d /tmp
           mkdir -p "${GITHUB_WORKSPACE}/clang"
-          curl -LSs -f "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/b5f16aee7b8af4c339972027e91e7e793c2e55d9/clang-r563880c.tar.gz" -o /tmp/clang.tar.gz
-          tar -xzf /tmp/clang.tar.gz -C "${GITHUB_WORKSPACE}/clang"
-          rm -f /tmp/clang.tar.gz
+          mv /tmp/android-ndk-r29/toolchains/llvm/prebuilt/linux-x86_64/* "${GITHUB_WORKSPACE}/clang/"
+          rm -rf /tmp/ndk.zip /tmp/android-ndk-r29
           "${GITHUB_WORKSPACE}/clang/bin/clang" --version
 
       - name: Build Kernel Image
