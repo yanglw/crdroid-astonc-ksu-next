@@ -33,6 +33,14 @@ jobs:
       - name: Maximize Build Space & Install Host Dependencies
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost
+          
+          # 创建 10GB Swap 虚拟内存，避免 LTO/大链接过程物理内存不足触发 OOM Killer
+          sudo fallocate -l 10G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=10240
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             bc bison build-essential ccache curl flex g++-multilib gcc-multilib git \
@@ -190,6 +198,11 @@ jobs:
           # 禁用 BTF 调试符号，规避 host pahole 冲突与编译报错
           ./scripts/config --file $DEFCONFIG -d DEBUG_INFO_BTF || true
           echo "CONFIG_DEBUG_INFO_BTF=n" >> $DEFCONFIG
+          # 禁用 LTO，规避 GitHub Actions 7GB 物理内存超限导致的 OOM Terminated
+          ./scripts/config --file $DEFCONFIG -d LTO_CLANG -d LTO_CLANG_FULL -d LTO_CLANG_THIN -e LTO_NONE || true
+          echo "CONFIG_LTO_NONE=y" >> $DEFCONFIG
+          echo "CONFIG_LTO_CLANG_FULL=n" >> $DEFCONFIG
+          echo "CONFIG_LTO_CLANG_THIN=n" >> $DEFCONFIG
 
       - name: Setup AOSP Clang Toolchain
         run: |
@@ -208,8 +221,9 @@ jobs:
           echo "Generating kernel configuration..."
           make -j$(nproc) O=out CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1 gki_defconfig
 
-          # 确保 out/.config 中彻底禁用 DEBUG_INFO_BTF
-          ./scripts/config --file out/.config -d DEBUG_INFO_BTF || true
+          # 确保 out/.config 中彻底禁用 DEBUG_INFO_BTF 与 LTO
+          ./scripts/config --file out/.config -d DEBUG_INFO_BTF -d LTO_CLANG -d LTO_CLANG_FULL -d LTO_CLANG_THIN -e LTO_NONE || true
+          make -j$(nproc) O=out CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1 olddefconfig
 
           echo "Compiling kernel Image..."
           make -j$(nproc) O=out CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1 Image
