@@ -50,7 +50,7 @@ jobs:
             bc bison build-essential ccache curl flex g++-multilib gcc-multilib git \
             gnupg gperf libelf-dev liblz4-tool libssl-dev libxml2 libxml2-utils lzop pngcrush \
             rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3 libdw-dev binutils file \
-            gcc-aarch64-linux-gnu libncurses-dev clang lld llvm dwarves || true
+            gcc-aarch64-linux-gnu libncurses-dev clang lld llvm dwarves pkg-config || true
 
       - name: Fetch Stock boot.img from URL
         run: |
@@ -301,7 +301,10 @@ jobs:
           # pahole 必须处于可用状态以生成 BTF 符号
           pahole --version || true
 
-          make -j$(nproc) O=out CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1 olddefconfig
+          make -j$(nproc) O=out LLVM=1 LLVM_IAS=1 \
+            HOSTCC=gcc HOSTCXX=g++ HOSTAR=ar HOSTLD=ld \
+            HOSTCFLAGS="-I/usr/include" HOSTLDFLAGS="-L/usr/lib/x86_64-linux-gnu" \
+            olddefconfig
 
           echo "Verifying crucial config flags in out/.config:"
           grep -E "CONFIG_ARCH_KALAMA|CONFIG_ARCH_QCOM|CONFIG_KSU|CONFIG_LTO_CLANG_FULL|CONFIG_CFI_CLANG|CONFIG_DEBUG_INFO_BTF" out/.config || true
@@ -316,7 +319,10 @@ jobs:
           fi
 
           echo "Compiling kernel Image (Full LTO matching stock crDroid)..."
-          make -j$(nproc) O=out CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1 Image
+          make -j$(nproc) O=out LLVM=1 LLVM_IAS=1 \
+            HOSTCC=gcc HOSTCXX=g++ HOSTAR=ar HOSTLD=ld \
+            HOSTCFLAGS="-I/usr/include" HOSTLDFLAGS="-L/usr/lib/x86_64-linux-gnu" \
+            Image
 
       - name: Repack boot.img
         run: |
