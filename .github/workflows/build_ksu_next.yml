@@ -276,18 +276,10 @@ jobs:
           magiskboot repack boot.img "${IMG_NAME}"
           mv "${IMG_NAME}" "${GITHUB_WORKSPACE}/dist/"
 
-          # 2. 打包 AnyKernel3 卡刷包
+          # 2. 打包 AnyKernel3 卡刷包 (使用一加 Ace 3 / 12R 专属模板)
           cd "${GITHUB_WORKSPACE}"
-          git clone --depth 1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+          git clone --depth 1 https://github.com/OnePlusACE3-development/AnyKernel3-aston AnyKernel3
           rm -rf AnyKernel3/.git
-          sed -i -e 's/kernel.string=.*/kernel.string=crDroid 16.0 Kernel for OnePlus Ace 3 \/ 12R/' \
-                 -e 's/do.devicecheck=1/do.devicecheck=1/' \
-                 -e 's/device.name1=.*/device.name1=astonc/' \
-                 -e 's/device.name2=.*/device.name2=aston/' \
-                 -e 's/device.name3=.*/device.name3=OnePlus12R/' \
-                 -e 's/device.name4=.*/device.name4=OP594DL1/' \
-                 -e 's/device.name5=.*/device.name5=/' \
-                 AnyKernel3/anykernel.sh
           cp "$IMAGE_PATH" AnyKernel3/Image
           ( cd AnyKernel3 && zip -r9 "${GITHUB_WORKSPACE}/dist/${AK3_NAME}" . -x '.git*' 'README.md' )
 
