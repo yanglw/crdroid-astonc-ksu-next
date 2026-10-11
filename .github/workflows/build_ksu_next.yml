@@ -4,38 +4,63 @@ on:
   workflow_dispatch:
     inputs:
       boot_url:
-        description: 'Direct download URL for stock boot.img (e.g. SourceForge / CDN link)'
+        description: 'Direct download URL for stock boot.img'
         required: true
       ksu_variant:
-        description: 'Choose Root Solution'
+        description: 'Root Solution'
         required: true
         type: choice
-        default: 'KernelSU-Next'
+        default: 'All'
         options:
+          - 'All'
           - 'KernelSU-Next'
           - 'KernelSU'
           - 'None (Pure Stock)'
       custom_commit:
-        description: 'Specific Kernel Commit SHA (Leave blank to auto-detect from boot.img)'
+        description: 'Kernel Commit SHA (Leave blank to auto-detect from boot.img)'
         required: false
         default: ''
 
 jobs:
-  build:
-    name: Build Kernel & Repack Boot
+  setup:
+    name: Prepare Matrix
     runs-on: ubuntu-22.04
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Resolve Target Variants
+        id: set-matrix
+        run: |
+          CHOICE="${{ github.event.inputs.ksu_variant }}"
+          if [ "$CHOICE" = "All" ]; then
+            echo 'matrix=["KernelSU-Next", "KernelSU", "None (Pure Stock)"]' >> $GITHUB_OUTPUT
+          else
+            echo "matrix=[\"${CHOICE}\"]" >> $GITHUB_OUTPUT
+          fi
+
+  build:
+    name: Build (${{ matrix.ksu_variant }})
+    needs: setup
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        ksu_variant: ${{ fromJson(needs.setup.outputs.matrix) }}
     permissions:
       contents: write
 
     steps:
-      - name: Checkout Builder Repo
+      - name: Checkout Repo
         uses: actions/checkout@v4
 
-      - name: Maximize Build Space & Install Host Dependencies
+      - name: Setup Build Environment
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # 释放磁盘空间
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost
-          
-          # 创建 24GB Swap 满足 Full LTO 编译内存需求
+
+          # 配置 24GB Swap (支持 Full LTO)
           sudo swapoff -a || true
           sudo rm -f /swapfile
           sudo fallocate -l 24G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=24576
@@ -43,139 +68,91 @@ jobs:
           sudo mkswap /swapfile
           sudo swapon /swapfile
           echo 100 | sudo tee /proc/sys/vm/swappiness || true
-          free -h
 
+          # 安装必要依赖
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            bc bison build-essential ccache curl flex git \
-            gnupg gperf libelf-dev liblz4-tool libssl-dev libxml2 libxml2-utils lzop pngcrush \
-            rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3 libdw-dev binutils file \
-            gcc-aarch64-linux-gnu libncurses-dev clang lld llvm dwarves pkg-config
+            bc bison build-essential curl flex git libelf-dev libssl-dev \
+            zip python3 binutils file dwarves pkg-config
 
-          # 校验宿主机关键头文件真实存在
-          ls -la /usr/include/libelf.h
+          # 安装 magiskboot
+          MAGISK_URL=$(curl -s ${GITHUB_TOKEN:+-H "Authorization: Bearer $GITHUB_TOKEN"} "https://api.github.com/repos/topjohnwu/Magisk/releases/latest" | grep "browser_download_url.*Magisk-.*\.apk" | head -n 1 | cut -d '"' -f 4 || true)
+          [ -z "$MAGISK_URL" ] && MAGISK_URL="https://github.com/topjohnwu/Magisk/releases/download/v30.7/Magisk-v30.7.apk"
+          curl -LSs -f "$MAGISK_URL" -o /tmp/magisk.apk
+          unzip -p /tmp/magisk.apk lib/x86_64/libmagiskboot.so > /tmp/magiskboot
+          chmod +x /tmp/magiskboot
+          sudo mv /tmp/magiskboot /usr/local/bin/magiskboot
+          rm -f /tmp/magisk.apk
 
-      - name: Fetch Stock boot.img from URL
+          # 安装 AOSP Clang r563880c (Clang 21)
+          echo "Setting up AOSP Clang toolchain..."
+          curl -LSs -f -o /tmp/ndk.zip "https://dl.google.com/android/repository/android-ndk-r29-linux.zip"
+          mkdir -p "${GITHUB_WORKSPACE}/clang"
+          unzip -q /tmp/ndk.zip "android-ndk-r29/toolchains/llvm/prebuilt/linux-x86_64/*" -d /tmp
+          mv /tmp/android-ndk-r29/toolchains/llvm/prebuilt/linux-x86_64/* "${GITHUB_WORKSPACE}/clang/"
+          rm -rf /tmp/ndk.zip /tmp/android-ndk-r29
+          "${GITHUB_WORKSPACE}/clang/bin/clang" --version
+
+      - name: Fetch Stock boot.img & Extract Config
         run: |
-          mkdir -p prebuilt
+          mkdir -p prebuilt repack configs
           RAW_INPUT="${{ github.event.inputs.boot_url }}"
-          
-          # 提取纯净 URL（自动兼容误贴的 markdown 格式或首尾多余字符）
           CLEAN_URL=$(echo "$RAW_INPUT" | grep -oE 'https?://[^])" >]+' | head -n 1)
-          if [ -z "$CLEAN_URL" ]; then
-            CLEAN_URL="$RAW_INPUT"
-          fi
+          [ -z "$CLEAN_URL" ] && CLEAN_URL="$RAW_INPUT"
 
-          # 针对 SourceForge 链接转换为直链下载地址
           if [[ "$CLEAN_URL" == *"sourceforge.net/projects/"* ]]; then
             CLEAN_URL=$(echo "$CLEAN_URL" | sed -E -e 's|/download/?$||' -e 's|sourceforge\.net/projects/|downloads.sourceforge.net/project/|' -e 's|/files/|/|')
           fi
 
-          echo "Downloading boot.img from: $CLEAN_URL"
+          echo "Downloading: $CLEAN_URL"
           curl -LSs -f -o prebuilt/boot.img "$CLEAN_URL" || \
           curl -LSs -f -o prebuilt/boot.img "${CLEAN_URL}?use_mirror=autoselect" || \
           curl -LSs -f -o prebuilt/boot.img "${RAW_INPUT}"
 
-          FILE_INFO=$(file prebuilt/boot.img)
-          echo "File verification: $FILE_INFO"
-          if echo "$FILE_INFO" | grep -qiE "HTML|ASCII text"; then
-            echo "ERROR: Downloaded file is an HTML page rather than a boot image binary."
-            exit 1
-          fi
+          file prebuilt/boot.img | grep -qiE "HTML|ASCII text" && { echo "Error: Invalid boot image binary"; exit 1; }
 
-      - name: Setup Tools & Inspect Stock boot.img
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          # 动态获取 Magisk 官方最新 Release APK 资产直链（避免资产名含版本号导致 404）
-          echo "Resolving latest Magisk APK download URL..."
-          MAGISK_URL=$(curl -s ${GITHUB_TOKEN:+-H "Authorization: Bearer $GITHUB_TOKEN"} "https://api.github.com/repos/topjohnwu/Magisk/releases/latest" | grep "browser_download_url.*Magisk-.*\.apk" | head -n 1 | cut -d '"' -f 4 || true)
-          if [ -z "$MAGISK_URL" ]; then
-            MAGISK_URL="https://github.com/topjohnwu/Magisk/releases/download/v30.7/Magisk-v30.7.apk"
-          fi
-
-          echo "Downloading Magisk from: $MAGISK_URL"
-          curl -LSs -f "$MAGISK_URL" -o /tmp/magisk.apk || \
-          curl -LSs -f "https://github.com/topjohnwu/Magisk/releases/download/v30.7/Magisk-v30.7.apk" -o /tmp/magisk.apk
-
-          unzip -p /tmp/magisk.apk lib/x86_64/libmagiskboot.so > /tmp/magiskboot
-          chmod +x /tmp/magiskboot
-          sudo cp /tmp/magiskboot /usr/local/bin/magiskboot
-          rm -f /tmp/magisk.apk /tmp/magiskboot
-          
-          mkdir -p repack
           cp prebuilt/boot.img repack/
           cd repack
           magiskboot unpack boot.img
 
-          # 仅在外部未指定 custom_commit 时，从原版内核镜像中探测 commit 和完整 vermagic
-          KERNEL_VER_LINE=$(strings kernel | grep -m 1 -E "Linux version 5\.15\.[0-9]+" || true)
-          echo "Stock Kernel Banner: ${KERNEL_VER_LINE}"
+          KERNEL_BANNER=$(strings kernel | grep -m 1 -E "Linux version 5\.15\.[0-9]+" || true)
+          echo "Stock Banner: ${KERNEL_BANNER}"
 
-          # 提取完整 UTS_RELEASE (例如 5.15.137-android14-11-g8a3e9c4b123)
-          STOCK_UTS=$(echo "$KERNEL_VER_LINE" | sed -E -n 's/.*Linux version ([^ ]+).*/\1/p' | head -n 1)
-          echo "Stock UTS_RELEASE: ${STOCK_UTS}"
-          echo "STOCK_UTS=${STOCK_UTS}" >> $GITHUB_ENV
-
-          # 提取 commit sha (即 -g 后的短哈希)
-          AUTO_SHA=$(echo "$STOCK_UTS" | grep -oE -- '-g[0-9a-f]+' | head -n 1 | sed 's/-g//' || true)
-          echo "Auto-detected Commit from boot.img: ${AUTO_SHA}"
-          echo "DETECTED_SHA=${AUTO_SHA}" >> $GITHUB_ENV
-
-          # 提取 5.15.xxx 之后的 SCM 后缀 (例如 -android14-11-g8a3e9c4b123)
+          STOCK_UTS=$(echo "$KERNEL_BANNER" | sed -E -n 's/.*Linux version ([^ ]+).*/\1/p' | head -n 1)
+          DETECTED_SHA=$(echo "$STOCK_UTS" | grep -oE -- '-g[0-9a-f]+' | head -n 1 | sed 's/-g//' || true)
           SCM_SUFFIX=$(echo "$STOCK_UTS" | sed -E 's/^5\.15\.[0-9]+//' || true)
-          echo "Stock SCM Suffix: ${SCM_SUFFIX}"
+
+          echo "STOCK_UTS=${STOCK_UTS}" >> $GITHUB_ENV
+          echo "DETECTED_SHA=${DETECTED_SHA}" >> $GITHUB_ENV
           echo "SCM_SUFFIX=${SCM_SUFFIX}" >> $GITHUB_ENV
 
-          # 自动从底包内核二进制中逆向提取 100% 真实的 IKCONFIG
-          echo "Scanning for embedded IKCONFIG in stock kernel binary..."
-          mkdir -p "${GITHUB_WORKSPACE}/configs"
+          # 提取嵌入的 IKCONFIG
           python3 -c "
           data = open('kernel', 'rb').read()
-          # 准确匹配 IKCFG_ST 紧随其后的 gzip 头魔数 0x1F 0x8B (避免误匹配 .rodata 中的常量字符)
           magic = bytes([0x49, 0x4B, 0x43, 0x46, 0x47, 0x5F, 0x53, 0x54, 0x1F, 0x8B])
           pos = data.find(magic)
           if pos != -1:
-              print(f'Found embedded IKCONFIG stream at offset: {pos}')
               with open('raw_config.gz', 'wb') as f:
                   f.write(data[pos+8:])
-          else:
-              print('IKCONFIG magic not found in kernel binary')
           " || true
 
           if [ -f "raw_config.gz" ]; then
-            zcat raw_config.gz > "${GITHUB_WORKSPACE}/configs/extracted.config" 2>/dev/null || \
-            gzip -dc raw_config.gz > "${GITHUB_WORKSPACE}/configs/extracted.config" 2>/dev/null || true
+            zcat raw_config.gz > "${GITHUB_WORKSPACE}/configs/stock.config" 2>/dev/null || \
+            gzip -dc raw_config.gz > "${GITHUB_WORKSPACE}/configs/stock.config" 2>/dev/null || true
           fi
 
-          if [ -s "${GITHUB_WORKSPACE}/configs/extracted.config" ]; then
-            echo "Successfully extracted $(wc -l < ${GITHUB_WORKSPACE}/configs/extracted.config) lines of exact stock config from boot.img."
-            cp "${GITHUB_WORKSPACE}/configs/extracted.config" "${GITHUB_WORKSPACE}/configs/active_stock.config"
-          else
-            echo "ERROR: Failed to extract stock configuration from boot.img!"
-            exit 1
-          fi
+          [ -s "${GITHUB_WORKSPACE}/configs/stock.config" ] || { echo "Error: Failed to extract kernel config"; exit 1; }
+          echo "Successfully extracted $(wc -l < ${GITHUB_WORKSPACE}/configs/stock.config) lines of stock config."
 
-      - name: Fetch Target Kernel Commit
+      - name: Checkout Kernel Source & Hardware Modules
         run: |
           TARGET_COMMIT="${{ github.event.inputs.custom_commit }}"
-          if [ -z "$TARGET_COMMIT" ]; then
-            TARGET_COMMIT="$DETECTED_SHA"
-            echo "Using auto-detected commit: $TARGET_COMMIT"
-          else
-            echo "Using user-specified commit: $TARGET_COMMIT"
-          fi
+          [ -z "$TARGET_COMMIT" ] && TARGET_COMMIT="$DETECTED_SHA"
 
-          # 若输入或探测到的是短 SHA（少于 40 位），通过 GitHub API 自动解析为完整 40 位 SHA
+          # 解析短 SHA 为完整 40 位 SHA (保证 git fetch --depth 1 成功)
           if [ -n "$TARGET_COMMIT" ] && [ ${#TARGET_COMMIT} -lt 40 ]; then
-            echo "Resolving full 40-char SHA for short commit: ${TARGET_COMMIT}..."
             FULL_SHA=$(curl -s -f "https://api.github.com/repos/crdroidandroid/android_kernel_oneplus_sm8550/commits/${TARGET_COMMIT}" | grep -m1 '"sha":' | cut -d '"' -f 4 || true)
-            if [ -n "$FULL_SHA" ] && [ ${#FULL_SHA} -eq 40 ]; then
-              echo "Resolved to full SHA: ${FULL_SHA}"
-              TARGET_COMMIT="$FULL_SHA"
-            else
-              echo "Warning: Could not resolve full SHA via API, using original: ${TARGET_COMMIT}"
-            fi
+            [ -n "$FULL_SHA" ] && [ ${#FULL_SHA} -eq 40 ] && TARGET_COMMIT="$FULL_SHA"
           fi
 
           mkdir -p kernel && cd kernel
@@ -185,19 +162,20 @@ jobs:
 
           if [ -n "$TARGET_COMMIT" ]; then
             echo "Fetching target commit: $TARGET_COMMIT"
-            git fetch --depth 1 origin "$TARGET_COMMIT" || {
-              echo "Warning: Failed to fetch target commit. Falling back to latest 16.0 HEAD..."
-              git fetch --depth 1 origin 16.0
-            }
+            git fetch --depth 1 origin "$TARGET_COMMIT" || git fetch --depth 1 origin 16.0
             git checkout FETCH_HEAD
           else
-            echo "No commit specified or detected. Fetching latest 16.0 HEAD directly..."
+            echo "Fetching 16.0 HEAD..."
             git fetch --depth 1 origin 16.0
             git checkout FETCH_HEAD
           fi
 
-          # 同步拉取配套的外部驱动模块仓库，并精确映射 18 个 Oplus 专有硬件驱动目录
-          echo "Cloning companion sm8550-modules repository..."
+          FINAL_SHA=$(git rev-parse HEAD)
+          SHORT_SHA=$(echo "${FINAL_SHA}" | cut -c1-12)
+          SUBLEVEL=$(grep "^SUBLEVEL =" Makefile | awk '{print $3}')
+          BUILD_DATE=$(date +'%Y%m%d')
+
+          # 链接 18 个配套硬件驱动目录
           git clone --depth 1 -b 16.0 https://github.com/crdroidandroid/android_kernel_oneplus_sm8550-modules.git "${GITHUB_WORKSPACE}/sm8550-modules"
           MROOT="${GITHUB_WORKSPACE}/sm8550-modules"
           mkdir -p drivers/soc/oplus kernel/oplus_cpu
@@ -220,65 +198,36 @@ jobs:
           ln -sfn "$MROOT/oplus/sensor/kernel/oplus_consumer_ir"                     drivers/soc/oplus/oplus_consumer_ir
           ln -sfn "$MROOT/oplus/sensor/kernel/qcom/sensor"                           drivers/soc/oplus/sensor
 
-          FINAL_SHA=$(git rev-parse HEAD)
-          SHORT_SHA=$(echo "${FINAL_SHA}" | cut -c1-12)
-          SUBLEVEL=$(grep "^SUBLEVEL =" Makefile | awk '{print $3}')
-          BUILD_DATE=$(date +'%Y%m%d')
+          # 设置 vermagic 与导出命名变量
+          [ -n "$SCM_SUFFIX" ] && echo -n "${SCM_SUFFIX}" > .scmversion || touch .scmversion
 
-          VARIANT="${{ github.event.inputs.ksu_variant }}"
-          if [ "${VARIANT}" = "KernelSU" ]; then
-            KSU_TAG="ksu"
-          elif [ "${VARIANT}" = "KernelSU-Next" ]; then
-            KSU_TAG="ksu-next"
-          else
-            KSU_TAG="stock"
-          fi
+          VARIANT="${{ matrix.ksu_variant }}"
+          case "${VARIANT}" in
+            "KernelSU")
+              KSU_TAG="ksu"
+              KSU_LABEL="KernelSU (Official)"
+              ;;
+            "KernelSU-Next")
+              KSU_TAG="ksu-next"
+              KSU_LABEL="KernelSU-Next"
+              ;;
+            *)
+              KSU_TAG="stock"
+              KSU_LABEL="Pure Stock"
+              ;;
+          esac
 
           IMG_NAME="crdroid-16.0-astonc-5.15.${SUBLEVEL}-${SHORT_SHA}-${KSU_TAG}-${BUILD_DATE}.img"
+          AK3_NAME="crdroid-16.0-astonc-5.15.${SUBLEVEL}-${SHORT_SHA}-${KSU_TAG}-${BUILD_DATE}-AK3.zip"
 
           echo "FINAL_SHA=${FINAL_SHA}" >> $GITHUB_ENV
           echo "SHORT_SHA=${SHORT_SHA}" >> $GITHUB_ENV
           echo "SUBLEVEL=${SUBLEVEL}" >> $GITHUB_ENV
           echo "BUILD_DATE=${BUILD_DATE}" >> $GITHUB_ENV
           echo "KSU_TAG=${KSU_TAG}" >> $GITHUB_ENV
+          echo "KSU_LABEL=${KSU_LABEL}" >> $GITHUB_ENV
           echo "IMG_NAME=${IMG_NAME}" >> $GITHUB_ENV
-
-          echo "Target Image Name: ${IMG_NAME}"
-
-      - name: Inject Root Solution (KernelSU / KernelSU-Next)
-        run: |
-          cd kernel
-          VARIANT="${{ github.event.inputs.ksu_variant }}"
-          echo "Injecting selected root solution: ${VARIANT}"
-
-          if [ "${VARIANT}" = "KernelSU" ]; then
-            curl -LSs -f "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
-            echo "KSU_LABEL=KernelSU (Official main branch)" >> $GITHUB_ENV
-          elif [ "${VARIANT}" = "KernelSU-Next" ]; then
-            curl -LSs -f "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s next
-            echo "KSU_LABEL=KernelSU-Next (Latest next branch)" >> $GITHUB_ENV
-          else
-            echo "Skipping KSU injection (Building Pure Stock Kernel)"
-            echo "KSU_LABEL=Pure Stock Baseline (No Root)" >> $GITHUB_ENV
-          fi
-          # 注入 .scmversion，防止源码树 dirty 导致 uname -r 产生 -dirty 尾缀，并完全对齐底包的 vermagic
-          if [ -n "$SCM_SUFFIX" ]; then
-            echo "Applying exact stock SCM suffix to .scmversion: ${SCM_SUFFIX}"
-            echo -n "${SCM_SUFFIX}" > .scmversion
-          else
-            touch .scmversion
-          fi
-
-      - name: Setup AOSP Clang Toolchain (clang-r563880c via NDK r29)
-        run: |
-          echo "Downloading official Clang r563880c (Clang 21) from Google CDN..."
-          curl -LSs -f -o /tmp/ndk.zip "https://dl.google.com/android/repository/android-ndk-r29-linux.zip"
-          echo "Extracting LLVM toolchain..."
-          unzip -q /tmp/ndk.zip "android-ndk-r29/toolchains/llvm/prebuilt/linux-x86_64/*" -d /tmp
-          mkdir -p "${GITHUB_WORKSPACE}/clang"
-          mv /tmp/android-ndk-r29/toolchains/llvm/prebuilt/linux-x86_64/* "${GITHUB_WORKSPACE}/clang/"
-          rm -rf /tmp/ndk.zip /tmp/android-ndk-r29
-          "${GITHUB_WORKSPACE}/clang/bin/clang" --version
+          echo "AK3_NAME=${AK3_NAME}" >> $GITHUB_ENV
 
       - name: Build Kernel Image
         run: |
@@ -288,136 +237,134 @@ jobs:
           export SUBARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
 
-          echo "Configuring kernel with 100% exact stock base..."
-          mkdir -p out
-          cp "${GITHUB_WORKSPACE}/configs/active_stock.config" out/.config
-
-          VARIANT="${{ github.event.inputs.ksu_variant }}"
-          if [ "${VARIANT}" != "None (Pure Stock)" ]; then
-            echo "Injecting KSU configuration into .config..."
-            ./scripts/config --file out/.config -e KSU -d KSU_SUSFS
-          else
-            echo "Pure stock baseline selected, leaving KSU untouched."
+          VARIANT="${{ matrix.ksu_variant }}"
+          if [ "${VARIANT}" = "KernelSU" ]; then
+            curl -LSs -f "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
+          elif [ "${VARIANT}" = "KernelSU-Next" ]; then
+            curl -LSs -f "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s next
           fi
 
-          # 注意：绝不禁用 DEBUG_INFO_BTF！Android 14+ / crDroid 16.0 的 bpfloader 严格依赖 /sys/kernel/btf/vmlinux
-          # pahole 必须处于可用状态以生成 BTF 符号
-          pahole --version || true
+          mkdir -p out
+          cp "${GITHUB_WORKSPACE}/configs/stock.config" out/.config
+          [ -n "$SCM_SUFFIX" ] && echo -n "${SCM_SUFFIX}" > out/.scmversion || touch out/.scmversion
 
+          if [ "${VARIANT}" != "None (Pure Stock)" ]; then
+            ./scripts/config --file out/.config -e KSU -d KSU_SUSFS
+          fi
+
+          # 宿主机工具使用原生 gcc 编译以支持 libelf 与 BTF 生成
           make -j$(nproc) O=out LLVM=1 LLVM_IAS=1 \
             HOSTCC=gcc HOSTCXX=g++ HOSTAR=ar HOSTLD=ld \
             HOSTCFLAGS="-I/usr/include" HOSTLDFLAGS="-L/usr/lib/x86_64-linux-gnu" \
             olddefconfig
 
-          echo "Verifying crucial config flags in out/.config:"
-          grep -E "CONFIG_ARCH_KALAMA|CONFIG_ARCH_QCOM|CONFIG_KSU|CONFIG_LTO_CLANG_FULL|CONFIG_CFI_CLANG|CONFIG_DEBUG_INFO_BTF" out/.config || true
-
-          # 确保 .scmversion 在源码根目录与 out 目录下均生效
-          if [ -n "$SCM_SUFFIX" ]; then
-            echo -n "${SCM_SUFFIX}" > .scmversion
-            echo -n "${SCM_SUFFIX}" > out/.scmversion
-          else
-            touch .scmversion
-            touch out/.scmversion
-          fi
-
-          echo "Compiling kernel Image (Full LTO matching stock crDroid)..."
+          echo "Compiling kernel Image (Full LTO)..."
           make -j$(nproc) O=out LLVM=1 LLVM_IAS=1 \
             HOSTCC=gcc HOSTCXX=g++ HOSTAR=ar HOSTLD=ld \
             HOSTCFLAGS="-I/usr/include" HOSTLDFLAGS="-L/usr/lib/x86_64-linux-gnu" \
             Image
 
-      - name: Repack boot.img
+      - name: Package Boot Image & AnyKernel3
         run: |
-          # 动态检索编译生成的内核 Image
-          IMAGE_PATH=""
-          if [ -f "kernel/out/arch/arm64/boot/Image" ]; then
-            IMAGE_PATH="kernel/out/arch/arm64/boot/Image"
-          elif [ -f "kernel/arch/arm64/boot/Image" ]; then
-            IMAGE_PATH="kernel/arch/arm64/boot/Image"
-          else
-            IMAGE_PATH=$(find . -name "Image" -type f | head -n 1)
-          fi
+          mkdir -p "${GITHUB_WORKSPACE}/dist"
+          IMAGE_PATH="${GITHUB_WORKSPACE}/kernel/out/arch/arm64/boot/Image"
+          [ -f "$IMAGE_PATH" ] || { echo "Error: Kernel Image not found"; exit 1; }
 
-          if [ -z "$IMAGE_PATH" ] || [ ! -f "$IMAGE_PATH" ]; then
-            echo "ERROR: Kernel Image binary not found after compilation!"
-            exit 1
-          fi
-
-          echo "Using compiled kernel Image from: $IMAGE_PATH"
-          cp "$IMAGE_PATH" repack/new_image
-          cd repack
-          rm -f kernel
-          mv new_image kernel
+          # 1. 打包 boot.img
+          cd "${GITHUB_WORKSPACE}/repack"
+          cp "$IMAGE_PATH" kernel
           magiskboot repack boot.img "${IMG_NAME}"
-          cp "${IMG_NAME}" "${GITHUB_WORKSPACE}/${IMG_NAME}"
+          mv "${IMG_NAME}" "${GITHUB_WORKSPACE}/dist/"
 
-      - name: Package AnyKernel3 Flashable ZIP
-        run: |
+          # 2. 打包 AnyKernel3 卡刷包
           cd "${GITHUB_WORKSPACE}"
-          echo "Cloning AnyKernel3 template for OnePlus Ace 3 (aston)..."
-          git clone --depth 1 https://github.com/OnePlusACE3-development/AnyKernel3-aston AnyKernel3 || \
-            git clone --depth 1 https://github.com/osm0sis/AnyKernel3 AnyKernel3
+          git clone --depth 1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
           rm -rf AnyKernel3/.git
-          cp "kernel/out/arch/arm64/boot/Image" AnyKernel3/Image
-          AK3_NAME="crdroid-16.0-astonc-5.15.${SUBLEVEL}-${SHORT_SHA}-${KSU_TAG}-${BUILD_DATE}-AK3.zip"
-          ( cd AnyKernel3 && zip -r9 "../${AK3_NAME}" . -x '.git*' 'README.md' )
-          echo "AK3_NAME=${AK3_NAME}" >> $GITHUB_ENV
-          echo "Successfully packaged AnyKernel3: ${AK3_NAME}"
+          sed -i -e 's/kernel.string=.*/kernel.string=crDroid 16.0 Kernel for OnePlus Ace 3 \/ 12R/' \
+                 -e 's/do.devicecheck=1/do.devicecheck=1/' \
+                 -e 's/device.name1=.*/device.name1=astonc/' \
+                 -e 's/device.name2=.*/device.name2=aston/' \
+                 -e 's/device.name3=.*/device.name3=OnePlus12R/' \
+                 -e 's/device.name4=.*/device.name4=OP594DL1/' \
+                 -e 's/device.name5=.*/device.name5=/' \
+                 AnyKernel3/anykernel.sh
+          cp "$IMAGE_PATH" AnyKernel3/Image
+          ( cd AnyKernel3 && zip -r9 "${GITHUB_WORKSPACE}/dist/${AK3_NAME}" . -x '.git*' 'README.md' )
 
-      - name: Upload Artifacts
+          # 3. 保存元数据供发布步骤解析
+          echo "SUBLEVEL=${SUBLEVEL}" > "${GITHUB_WORKSPACE}/dist/metadata.env"
+          echo "SHORT_SHA=${SHORT_SHA}" >> "${GITHUB_WORKSPACE}/dist/metadata.env"
+          echo "FINAL_SHA=${FINAL_SHA}" >> "${GITHUB_WORKSPACE}/dist/metadata.env"
+          echo "BUILD_DATE=${BUILD_DATE}" >> "${GITHUB_WORKSPACE}/dist/metadata.env"
+
+      - name: Upload Matrix Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.IMG_NAME }}-artifacts
-          path: |
-            ${{ env.IMG_NAME }}
-            ${{ env.AK3_NAME }}
+          name: dist-${{ env.KSU_TAG }}
+          path: dist/*
 
-      - name: Publish to GitHub Release
+  release:
+    name: Publish Release
+    needs: [setup, build]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: release_dist
+          merge-multiple: true
+
+      - name: Publish Unified GitHub Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VARIANT="${{ github.event.inputs.ksu_variant }}"
-          TAG_NAME="v16.0-5.15.${SUBLEVEL}-${SHORT_SHA}-${KSU_TAG}-${BUILD_DATE}"
-          RELEASE_TITLE="crDroid 16.0 (5.15.${SUBLEVEL}-${SHORT_SHA}) ${VARIANT}"
+          cd release_dist
+          if [ -f "metadata.env" ]; then
+            source metadata.env
+            rm -f metadata.env
+          fi
+
+          # 生成合并后的校验哈希
+          sha256sum *.img *.zip > sha256.txt
+          echo "Output files ready for release:"
+          ls -la
+
+          CHOICE="${{ github.event.inputs.ksu_variant }}"
+          if [ "$CHOICE" = "All" ]; then
+            TAG_NAME="v16.0-5.15.${SUBLEVEL}-${SHORT_SHA}-all-${BUILD_DATE}"
+            RELEASE_TITLE="crDroid 16.0 (5.15.${SUBLEVEL}-${SHORT_SHA}) All Variants"
+          else
+            TAG_NAME="v16.0-5.15.${SUBLEVEL}-${SHORT_SHA}-${CHOICE}-${BUILD_DATE}"
+            RELEASE_TITLE="crDroid 16.0 (5.15.${SUBLEVEL}-${SHORT_SHA}) ${CHOICE}"
+          fi
 
           cat <<EOF > release_notes.md
-          ### 镜像规格
-          - **boot 镜像**: \`${IMG_NAME}\`
-          - **AnyKernel3 刷机包**: \`${AK3_NAME}\`
-          - **适用设备**: 一加 Ace 3 / 一加 12R (\`astonc\` / \`aston\`)
-          - **内核版本**: \`Linux 5.15.${SUBLEVEL}\`
-          - **内核提交**: [${SHORT_SHA}](https://github.com/crdroidandroid/android_kernel_oneplus_sm8550/commit/${FINAL_SHA})
-          - **配置基准**: 底包官方 100% 原始 \`.config\` 提取（Full LTO + CFI 原生对齐）
-          - **集成方案**: ${KSU_LABEL}
-          - **编译工具**: AOSP Clang r563880c (Clang 21.0.0 Native Build)
-          - **底包来源**: [Stock boot.img](${{ github.event.inputs.boot_url }})
+### 规格信息
+- **适用设备**: 一加 Ace 3 / 一加 12R (`astonc` / `aston`)
+- **系统版本**: crDroid 16.0 (Android 16)
+- **内核版本**: Linux 5.15.${SUBLEVEL} ([`${SHORT_SHA}`](https://github.com/crdroidandroid/android_kernel_oneplus_sm8550/commit/${FINAL_SHA}))
+- **构建方案**: ${CHOICE}
+- **编译器**: AOSP Clang r563880c (Clang 21.0.0)
 
-          ---
+### 产物格式说明
+- **`.img` (Boot 镜像)**: 官方底包重封装镜像，适用于电脑端 Fastboot 线刷。
+- **`-AK3.zip` (AnyKernel3 卡刷包)**: 原地替换内核并保留系统 ramdisk 与引导参数，推荐在 Recovery 模式下卡刷。
 
-          ### 刷入方式（双方案任选）
+### 版本后缀说明
+- **`ksu-next`**: 集成 KernelSU-Next 分支（支持新特性与模块）
+- **`ksu`**: 集成 KernelSU 官方稳定分支（成熟稳定）
+- **`stock`**: 原生未 Root 纯净内核（用于一键救砖或无损卸载 Root）
 
-          #### 方案 A：crDroid Recovery 中卡刷 / Sideload（强烈推荐，100% 绕过 fastboot AVB 限制）
-          1. 手机进入 Recovery 模式（关机状态长按 **音量减 + 电源键**）。
-          2. 选择 **Apply update** -> **Apply from ADB**。
-          3. 电脑端执行刷入命令：
-             \`\`\`bash
-             adb sideload ${AK3_NAME}
-             \`\`\`
-          4. 刷完后直接点击 **Reboot system now** 开机！
-
-          #### 方案 B：Fastboot 线刷 boot.img
-          \`\`\`bash
-          adb reboot bootloader
-          # 若此前启动重试次数耗尽，可先重置槽位：
-          fastboot --set-active=b
-          fastboot flash boot ${IMG_NAME}
-          fastboot reboot
-          \`\`\`
-          EOF
+### 刷入说明
+- **Recovery 卡刷 (推荐)**: 手机进入 Recovery 模式 -> \`adb sideload <对应的 AK3.zip>\`
+- **Fastboot 线刷**: \`fastboot flash boot <对应的 boot.img>\`
+EOF
 
           gh release create "${TAG_NAME}" \
-            "${IMG_NAME}" "${AK3_NAME}" \
+            * \
             --title "${RELEASE_TITLE}" \
             --notes-file release_notes.md || \
-          gh release upload "${TAG_NAME}" "${IMG_NAME}" "${AK3_NAME}" --clobber
+          gh release upload "${TAG_NAME}" * --clobber
