@@ -341,27 +341,27 @@ jobs:
             RELEASE_TITLE="crDroid 16.0 (5.15.${SUBLEVEL}-${SHORT_SHA}) ${CHOICE}"
           fi
 
-          cat <<EOF > release_notes.md
-### 规格信息
-- **适用设备**: 一加 Ace 3 / 一加 12R (`astonc` / `aston`)
-- **系统版本**: crDroid 16.0 (Android 16)
-- **内核版本**: Linux 5.15.${SUBLEVEL} ([`${SHORT_SHA}`](https://github.com/crdroidandroid/android_kernel_oneplus_sm8550/commit/${FINAL_SHA}))
-- **构建方案**: ${CHOICE}
-- **编译器**: AOSP Clang r563880c (Clang 21.0.0)
-
-### 产物格式说明
-- **`.img` (Boot 镜像)**: 官方底包重封装镜像，适用于电脑端 Fastboot 线刷。
-- **`-AK3.zip` (AnyKernel3 卡刷包)**: 原地替换内核并保留系统 ramdisk 与引导参数，推荐在 Recovery 模式下卡刷。
-
-### 版本后缀说明
-- **`ksu-next`**: 集成 KernelSU-Next 分支（支持新特性与模块）
-- **`ksu`**: 集成 KernelSU 官方稳定分支（成熟稳定）
-- **`stock`**: 原生未 Root 纯净内核（用于一键救砖或无损卸载 Root）
-
-### 刷入说明
-- **Recovery 卡刷 (推荐)**: 手机进入 Recovery 模式 -> \`adb sideload <对应的 AK3.zip>\`
-- **Fastboot 线刷**: \`fastboot flash boot <对应的 boot.img>\`
-EOF
+          {
+            echo "### 规格信息"
+            echo "- **适用设备**: 一加 Ace 3 / 一加 12R (\`astonc\` / \`aston\`)"
+            echo "- **系统版本**: crDroid 16.0 (Android 16)"
+            echo "- **内核版本**: Linux 5.15.${SUBLEVEL} ([\`${SHORT_SHA}\`](https://github.com/crdroidandroid/android_kernel_oneplus_sm8550/commit/${FINAL_SHA}))"
+            echo "- **构建方案**: ${CHOICE}"
+            echo "- **编译器**: AOSP Clang r563880c (Clang 21.0.0)"
+            echo ""
+            echo "### 产物格式说明"
+            echo "- **\`.img\` (Boot 镜像)**: 官方底包重封装镜像，适用于电脑端 Fastboot 线刷。"
+            echo "- **\`-AK3.zip\` (AnyKernel3 卡刷包)**: 原地替换内核并保留系统 ramdisk 与引导参数，推荐在 Recovery 模式下卡刷。"
+            echo ""
+            echo "### 版本后缀说明"
+            echo "- **\`ksu-next\`**: 集成 KernelSU-Next 分支（支持新特性与模块）"
+            echo "- **\`ksu\`**: 集成 KernelSU 官方稳定分支（成熟稳定）"
+            echo "- **\`stock\`**: 原生未 Root 纯净内核（用于一键救砖或无损卸载 Root）"
+            echo ""
+            echo "### 刷入说明"
+            echo "- **Recovery 卡刷 (推荐)**: 手机进入 Recovery 模式 -> \`adb sideload <对应的 AK3.zip>\`"
+            echo "- **Fastboot 线刷**: \`fastboot flash boot <对应的 boot.img>\`"
+          } > release_notes.md
 
           gh release create "${TAG_NAME}" \
             * \
