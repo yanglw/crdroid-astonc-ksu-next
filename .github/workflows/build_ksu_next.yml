@@ -310,6 +310,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -364,7 +367,8 @@ jobs:
           } > release_notes.md
 
           gh release create "${TAG_NAME}" \
-            * \
+            crdroid-* sha256.txt \
+            --repo "${{ github.repository }}" \
             --title "${RELEASE_TITLE}" \
             --notes-file release_notes.md || \
-          gh release upload "${TAG_NAME}" * --clobber
+          gh release upload "${TAG_NAME}" crdroid-* sha256.txt --repo "${{ github.repository }}" --clobber
