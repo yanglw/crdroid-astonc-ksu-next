@@ -1,11 +1,16 @@
-name: Build crDroid 16.0 Boot (KernelSU / KernelSU-Next)
+name: Build crDroid Boot (KernelSU / KernelSU-Next)
 
 on:
   workflow_dispatch:
     inputs:
-      boot_url:
-        description: 'Direct download URL for stock boot.img'
-        required: true
+      boot_url_13:
+        description: 'crDroid 13 (Android 17) stock boot.img URL (Leave blank to skip)'
+        required: false
+        default: ''
+      boot_url_12:
+        description: 'crDroid 12 (Android 16) stock boot.img URL (Leave blank to skip)'
+        required: false
+        default: ''
       ksu_variant:
         description: 'Root Solution'
         required: true
@@ -16,8 +21,12 @@ on:
           - 'KernelSU-Next'
           - 'KernelSU'
           - 'None (Pure Stock)'
-      custom_commit:
-        description: 'Kernel Commit SHA (Leave blank to auto-detect from boot.img)'
+      custom_commit_13:
+        description: 'Kernel Commit SHA for crDroid 13 (Leave blank to auto-detect)'
+        required: false
+        default: ''
+      custom_commit_12:
+        description: 'Kernel Commit SHA for crDroid 12 (Leave blank to auto-detect)'
         required: false
         default: ''
 
@@ -27,25 +36,83 @@ jobs:
     runs-on: ubuntu-22.04
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
+      built_versions: ${{ steps.set-matrix.outputs.built_versions }}
     steps:
-      - name: Resolve Target Variants
+      - name: Resolve Matrix
         id: set-matrix
+        env:
+          URL_13: ${{ github.event.inputs.boot_url_13 }}
+          URL_12: ${{ github.event.inputs.boot_url_12 }}
+          COMMIT_13: ${{ github.event.inputs.custom_commit_13 }}
+          COMMIT_12: ${{ github.event.inputs.custom_commit_12 }}
+          KSU_CHOICE: ${{ github.event.inputs.ksu_variant }}
         run: |
-          CHOICE="${{ github.event.inputs.ksu_variant }}"
-          if [ "$CHOICE" = "All" ]; then
-            echo 'matrix=["KernelSU-Next", "KernelSU", "None (Pure Stock)"]' >> $GITHUB_OUTPUT
-          else
-            echo "matrix=[\"${CHOICE}\"]" >> $GITHUB_OUTPUT
-          fi
+          python3 -c '
+          import json, os
+
+          url13 = os.environ.get("URL_13", "").strip()
+          url12 = os.environ.get("URL_12", "").strip()
+          commit13 = os.environ.get("COMMIT_13", "").strip()
+          commit12 = os.environ.get("COMMIT_12", "").strip()
+          ksu_choice = os.environ.get("KSU_CHOICE", "All")
+
+          if ksu_choice == "All":
+              ksu_list = ["KernelSU-Next", "KernelSU", "None (Pure Stock)"]
+          else:
+              ksu_list = [ksu_choice]
+
+          matrix = []
+          built_versions = []
+
+          # 填写了 13 的 boot.img URL 则构建 13
+          if url13:
+              built_versions.append("13")
+              for ksu in ksu_list:
+                  matrix.append({
+                      "version": "13",
+                      "cr_ver": "13.0",
+                      "android_ver": "Android 17",
+                      "cr_branch": "17.0",
+                      "boot_url": url13,
+                      "custom_commit": commit13,
+                      "ksu_variant": ksu
+                  })
+
+          # 填写了 12 的 boot.img URL 则构建 12
+          if url12:
+              built_versions.append("12")
+              for ksu in ksu_list:
+                  matrix.append({
+                      "version": "12",
+                      "cr_ver": "12.0",
+                      "android_ver": "Android 16",
+                      "cr_branch": "16.0",
+                      "boot_url": url12,
+                      "custom_commit": commit12,
+                      "ksu_variant": ksu
+                  })
+
+          if not matrix:
+              print("ERROR: No boot.img URL provided! Please fill in boot_url_13 or boot_url_12 (or both).")
+              exit(1)
+
+          matrix_json = json.dumps(matrix)
+          versions_str = ",".join(built_versions)
+
+          print(f"Generated Matrix ({len(matrix)} parallel jobs): {matrix_json}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"matrix={matrix_json}\n")
+              f.write(f"built_versions={versions_str}\n")
+          '
 
   build:
-    name: Build (${{ matrix.ksu_variant }})
+    name: Build (${{ matrix.cr_ver }} - ${{ matrix.ksu_variant }})
     needs: setup
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
       matrix:
-        ksu_variant: ${{ fromJson(needs.setup.outputs.matrix) }}
+        include: ${{ fromJson(needs.setup.outputs.matrix) }}
     permissions:
       contents: write
 
@@ -96,7 +163,7 @@ jobs:
       - name: Fetch Stock boot.img & Extract Config
         run: |
           mkdir -p prebuilt repack configs
-          RAW_INPUT="${{ github.event.inputs.boot_url }}"
+          RAW_INPUT="${{ matrix.boot_url }}"
           CLEAN_URL=$(echo "$RAW_INPUT" | grep -oE 'https?://[^])" >]+' | head -n 1)
           [ -z "$CLEAN_URL" ] && CLEAN_URL="$RAW_INPUT"
 
@@ -125,6 +192,11 @@ jobs:
           echo "STOCK_UTS=${STOCK_UTS}" >> $GITHUB_ENV
           echo "DETECTED_SHA=${DETECTED_SHA}" >> $GITHUB_ENV
           echo "SCM_SUFFIX=${SCM_SUFFIX}" >> $GITHUB_ENV
+          echo "CR_BRANCH=${{ matrix.cr_branch }}" >> $GITHUB_ENV
+          echo "CR_VER=${{ matrix.cr_ver }}" >> $GITHUB_ENV
+          echo "ANDROID_VER=${{ matrix.android_ver }}" >> $GITHUB_ENV
+
+          echo "Target Version: crDroid ${{ matrix.cr_ver }} (${{ matrix.android_ver }}) -> Branch ${{ matrix.cr_branch }}"
 
           # 提取嵌入的 IKCONFIG
           python3 -c "
@@ -146,7 +218,7 @@ jobs:
 
       - name: Checkout Kernel Source & Hardware Modules
         run: |
-          TARGET_COMMIT="${{ github.event.inputs.custom_commit }}"
+          TARGET_COMMIT="${{ matrix.custom_commit }}"
           [ -z "$TARGET_COMMIT" ] && TARGET_COMMIT="$DETECTED_SHA"
 
           # 解析短 SHA 为完整 40 位 SHA (保证 git fetch --depth 1 成功)
@@ -162,11 +234,11 @@ jobs:
 
           if [ -n "$TARGET_COMMIT" ]; then
             echo "Fetching target commit: $TARGET_COMMIT"
-            git fetch --depth 1 origin "$TARGET_COMMIT" || git fetch --depth 1 origin 16.0
+            git fetch --depth 1 origin "$TARGET_COMMIT" || git fetch --depth 1 origin "${CR_BRANCH}"
             git checkout FETCH_HEAD
           else
-            echo "Fetching 16.0 HEAD..."
-            git fetch --depth 1 origin 16.0
+            echo "Fetching ${CR_BRANCH} HEAD..."
+            git fetch --depth 1 origin "${CR_BRANCH}"
             git checkout FETCH_HEAD
           fi
 
@@ -176,7 +248,7 @@ jobs:
           BUILD_DATE=$(date +'%Y%m%d')
 
           # 链接 18 个配套硬件驱动目录
-          git clone --depth 1 -b 16.0 https://github.com/crdroidandroid/android_kernel_oneplus_sm8550-modules.git "${GITHUB_WORKSPACE}/sm8550-modules"
+          git clone --depth 1 -b "${CR_BRANCH}" https://github.com/crdroidandroid/android_kernel_oneplus_sm8550-modules.git "${GITHUB_WORKSPACE}/sm8550-modules"
           MROOT="${GITHUB_WORKSPACE}/sm8550-modules"
           mkdir -p drivers/soc/oplus kernel/oplus_cpu
           ln -sfn "$MROOT/oplus/kernel/cpu/thermal"                                   kernel/oplus_cpu/thermal
@@ -217,8 +289,8 @@ jobs:
               ;;
           esac
 
-          IMG_NAME="crdroid-16.0-astonc-5.15.${SUBLEVEL}-${SHORT_SHA}-${KSU_TAG}-${BUILD_DATE}.img"
-          AK3_NAME="crdroid-16.0-astonc-5.15.${SUBLEVEL}-${SHORT_SHA}-${KSU_TAG}-${BUILD_DATE}-AK3.zip"
+          IMG_NAME="crdroid-${CR_BRANCH}-astonc-5.15.${SUBLEVEL}-${SHORT_SHA}-${KSU_TAG}-${BUILD_DATE}.img"
+          AK3_NAME="crdroid-${CR_BRANCH}-astonc-5.15.${SUBLEVEL}-${SHORT_SHA}-${KSU_TAG}-${BUILD_DATE}-AK3.zip"
 
           echo "FINAL_SHA=${FINAL_SHA}" >> $GITHUB_ENV
           echo "SHORT_SHA=${SHORT_SHA}" >> $GITHUB_ENV
@@ -284,15 +356,18 @@ jobs:
           ( cd AnyKernel3 && zip -r9 "${GITHUB_WORKSPACE}/dist/${AK3_NAME}" . -x '.git*' 'README.md' )
 
           # 3. 保存元数据供发布步骤解析
-          echo "SUBLEVEL=${SUBLEVEL}" > "${GITHUB_WORKSPACE}/dist/metadata.env"
-          echo "SHORT_SHA=${SHORT_SHA}" >> "${GITHUB_WORKSPACE}/dist/metadata.env"
-          echo "FINAL_SHA=${FINAL_SHA}" >> "${GITHUB_WORKSPACE}/dist/metadata.env"
-          echo "BUILD_DATE=${BUILD_DATE}" >> "${GITHUB_WORKSPACE}/dist/metadata.env"
+          echo "CR_BRANCH=${CR_BRANCH}" > "${GITHUB_WORKSPACE}/dist/metadata_${CR_BRANCH}_${KSU_TAG}.env"
+          echo "CR_VER=${CR_VER}" >> "${GITHUB_WORKSPACE}/dist/metadata_${CR_BRANCH}_${KSU_TAG}.env"
+          echo "ANDROID_VER=${ANDROID_VER}" >> "${GITHUB_WORKSPACE}/dist/metadata_${CR_BRANCH}_${KSU_TAG}.env"
+          echo "SUBLEVEL=${SUBLEVEL}" >> "${GITHUB_WORKSPACE}/dist/metadata_${CR_BRANCH}_${KSU_TAG}.env"
+          echo "SHORT_SHA=${SHORT_SHA}" >> "${GITHUB_WORKSPACE}/dist/metadata_${CR_BRANCH}_${KSU_TAG}.env"
+          echo "FINAL_SHA=${FINAL_SHA}" >> "${GITHUB_WORKSPACE}/dist/metadata_${CR_BRANCH}_${KSU_TAG}.env"
+          echo "BUILD_DATE=${BUILD_DATE}" >> "${GITHUB_WORKSPACE}/dist/metadata_${CR_BRANCH}_${KSU_TAG}.env"
 
       - name: Upload Matrix Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: dist-${{ env.KSU_TAG }}
+          name: dist-${{ matrix.cr_branch }}-${{ env.KSU_TAG }}
           path: dist/*
 
   release:
@@ -315,43 +390,57 @@ jobs:
       - name: Publish Unified GitHub Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BUILT_VERSIONS: ${{ needs.setup.outputs.built_versions }}
+          KSU_CHOICE: ${{ github.event.inputs.ksu_variant }}
         run: |
           cd release_dist
-          if [ -f "metadata.env" ]; then
-            source metadata.env
-            rm -f metadata.env
-          fi
+
+          BUILD_DATE=$(date +'%Y%m%d')
+
+          # 清理元数据临时文件
+          rm -f metadata*.env
 
           # 生成合并后的校验哈希
           sha256sum *.img *.zip > sha256.txt
           echo "Output files ready for release:"
           ls -la
 
-          CHOICE="${{ github.event.inputs.ksu_variant }}"
-          if [ "$CHOICE" = "All" ]; then
-            TAG_NAME="v16.0-5.15.${SUBLEVEL}-${SHORT_SHA}-all-${BUILD_DATE}"
-            RELEASE_TITLE="crDroid 16.0 (5.15.${SUBLEVEL}-${SHORT_SHA}) All Variants"
+          # 根据构建的版本生成统一的 Tag 和标题
+          if [[ "$BUILT_VERSIONS" == *"12"* ]] && [[ "$BUILT_VERSIONS" == *"13"* ]]; then
+            TAG_NAME="v12-v13-${KSU_CHOICE}-${BUILD_DATE}"
+            RELEASE_TITLE="crDroid 12.0 & 13.0 (Android 16 & 17) - ${KSU_CHOICE}"
+          elif [[ "$BUILT_VERSIONS" == *"13"* ]]; then
+            TAG_NAME="v17.0-${KSU_CHOICE}-${BUILD_DATE}"
+            RELEASE_TITLE="crDroid 13.0 (Android 17) - ${KSU_CHOICE}"
           else
-            TAG_NAME="v16.0-5.15.${SUBLEVEL}-${SHORT_SHA}-${CHOICE}-${BUILD_DATE}"
-            RELEASE_TITLE="crDroid 16.0 (5.15.${SUBLEVEL}-${SHORT_SHA}) ${CHOICE}"
+            TAG_NAME="v16.0-${KSU_CHOICE}-${BUILD_DATE}"
+            RELEASE_TITLE="crDroid 12.0 (Android 16) - ${KSU_CHOICE}"
           fi
 
           {
             echo "### 规格信息"
             echo "- **适用设备**: 一加 Ace 3 / 一加 12R (\`astonc\` / \`aston\`)"
-            echo "- **系统版本**: crDroid 16.0 (Android 16)"
-            echo "- **内核版本**: Linux 5.15.${SUBLEVEL} ([\`${SHORT_SHA}\`](https://github.com/crdroidandroid/android_kernel_oneplus_sm8550/commit/${FINAL_SHA}))"
-            echo "- **构建方案**: ${CHOICE}"
+            if [[ "$BUILT_VERSIONS" == *"12"* ]] && [[ "$BUILT_VERSIONS" == *"13"* ]]; then
+              echo "- **包含系统**: crDroid 12.0 (Android 16) & crDroid 13.0 (Android 17)"
+            elif [[ "$BUILT_VERSIONS" == *"13"* ]]; then
+              echo "- **包含系统**: crDroid 13.0 (Android 17)"
+            else
+              echo "- **包含系统**: crDroid 12.0 (Android 16)"
+            fi
+            echo "- **构建方案**: ${KSU_CHOICE}"
             echo "- **编译器**: AOSP Clang r563880c (Clang 21.0.0)"
+            echo "- **构建日期**: ${BUILD_DATE}"
             echo ""
             echo "### 产物格式说明"
-            echo "- **\`.img\` (Boot 镜像)**: 官方底包重封装镜像，适用于电脑端 Fastboot 线刷。"
+            echo "- **\`.img\` (Boot 镜像)**: 官方底包重封装镜像，适用于电脑端 Fastboot 线刷（请根据文件名区分 16.0 与 17.0）。"
             echo "- **\`-AK3.zip\` (AnyKernel3 卡刷包)**: 原地替换内核并保留系统 ramdisk 与引导参数，推荐在 Recovery 模式下卡刷。"
             echo ""
-            echo "### 版本后缀说明"
-            echo "- **\`ksu-next\`**: 集成 KernelSU-Next 分支（支持新特性与模块）"
-            echo "- **\`ksu\`**: 集成 KernelSU 官方稳定分支（成熟稳定）"
-            echo "- **\`stock\`**: 原生未 Root 纯净内核（用于一键救砖或无损卸载 Root）"
+            echo "### 版本标识说明"
+            echo "- **\`crdroid-17.0-...\`**: 适配 **crDroid 13 (Android 17)** 底包"
+            echo "- **\`crdroid-16.0-...\`**: 适配 **crDroid 12 (Android 16)** 底包"
+            echo "- **\`ksu-next\`**: 集成 KernelSU-Next 分支"
+            echo "- **\`ksu\`**: 集成 KernelSU 官方稳定分支"
+            echo "- **\`stock\`**: 原生未 Root 纯净内核"
             echo ""
             echo "### 刷入说明"
             echo "- **Recovery 卡刷 (推荐)**: 手机进入 Recovery 模式 -> \`adb sideload <对应的 AK3.zip>\`"
