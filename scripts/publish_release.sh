@@ -17,10 +17,57 @@ METADATA_SECTION=""
 for env_file in metadata_*.env; do
   [ -f "$env_file" ] || continue
 
-  # 加载元数据环境变量
-  unset CR_BRANCH CR_VER ANDROID_VER SUBLEVEL SHORT_SHA FINAL_SHA MODULES_SHA MODULES_SHORT_SHA BOOT_URL KERNEL_BANNER STOCK_UTS DETECTED_SHA KSU_TAG KSU_LABEL IMG_NAME AK3_NAME
-  # shellcheck source=/dev/null
-  . "$env_file"
+  # 安全加载元数据，按行解析 key=value，避免因包含空格或括号导致 source 报错
+  CR_BRANCH=""
+  CR_VER=""
+  ANDROID_VER=""
+  SUBLEVEL=""
+  SHORT_SHA=""
+  FINAL_SHA=""
+  MODULES_SHA=""
+  MODULES_SHORT_SHA=""
+  BOOT_URL=""
+  KERNEL_BANNER=""
+  STOCK_UTS=""
+  DETECTED_SHA=""
+  KSU_TAG=""
+  KSU_LABEL=""
+  IMG_NAME=""
+  AK3_NAME=""
+  BUILD_DATE=""
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+    [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+    if [[ "$line" == *"="* ]]; then
+      key="${line%%=*}"
+      val="${line#*=}"
+      # 移除首尾引号
+      val="${val%\"}"
+      val="${val#\"}"
+      val="${val%\'}"
+      val="${val#\'}"
+      case "$key" in
+        CR_BRANCH) CR_BRANCH="$val" ;;
+        CR_VER) CR_VER="$val" ;;
+        ANDROID_VER) ANDROID_VER="$val" ;;
+        SUBLEVEL) SUBLEVEL="$val" ;;
+        SHORT_SHA) SHORT_SHA="$val" ;;
+        FINAL_SHA) FINAL_SHA="$val" ;;
+        MODULES_SHA) MODULES_SHA="$val" ;;
+        MODULES_SHORT_SHA) MODULES_SHORT_SHA="$val" ;;
+        BOOT_URL) BOOT_URL="$val" ;;
+        KERNEL_BANNER) KERNEL_BANNER="$val" ;;
+        STOCK_UTS) STOCK_UTS="$val" ;;
+        DETECTED_SHA) DETECTED_SHA="$val" ;;
+        KSU_TAG) KSU_TAG="$val" ;;
+        KSU_LABEL) KSU_LABEL="$val" ;;
+        IMG_NAME) IMG_NAME="$val" ;;
+        AK3_NAME) AK3_NAME="$val" ;;
+        BUILD_DATE) BUILD_DATE="$val" ;;
+      esac
+    fi
+  done < "$env_file"
 
   # 检查当前分支是否已经记录
   branch_seen=false
