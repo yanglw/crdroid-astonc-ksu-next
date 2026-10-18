@@ -1,0 +1,143 @@
+name: Build crDroid Boot (KernelSU / KernelSU-Next)
+
+on:
+  workflow_dispatch:
+    inputs:
+      boot_url_13:
+        description: 'crDroid 13 (Android 17) stock boot.img URL (Leave blank to skip)'
+        required: false
+        default: ''
+      boot_url_12:
+        description: 'crDroid 12 (Android 16) stock boot.img URL (Leave blank to skip)'
+        required: false
+        default: ''
+      ksu_variant:
+        description: 'Root Solution'
+        required: true
+        type: choice
+        default: 'All'
+        options:
+          - 'All'
+          - 'KernelSU-Next'
+          - 'KernelSU'
+          - 'None (Pure Stock)'
+      custom_commit_13:
+        description: 'Kernel Commit SHA for crDroid 13 (Leave blank to auto-detect)'
+        required: false
+        default: ''
+      custom_commit_12:
+        description: 'Kernel Commit SHA for crDroid 12 (Leave blank to auto-detect)'
+        required: false
+        default: ''
+
+jobs:
+  setup:
+    name: Prepare Matrix
+    runs-on: ubuntu-22.04
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      built_versions: ${{ steps.set-matrix.outputs.built_versions }}
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v6
+
+      - name: Resolve Matrix
+        id: set-matrix
+        env:
+          BOOT_URL_13: ${{ github.event.inputs.boot_url_13 }}
+          BOOT_URL_12: ${{ github.event.inputs.boot_url_12 }}
+          CUSTOM_COMMIT_13: ${{ github.event.inputs.custom_commit_13 }}
+          CUSTOM_COMMIT_12: ${{ github.event.inputs.custom_commit_12 }}
+          KSU_VARIANT: ${{ github.event.inputs.ksu_variant }}
+        run: bash scripts/setup_matrix.sh
+
+  build:
+    name: Build (${{ matrix.cr_ver }} - ${{ matrix.ksu_variant }})
+    needs: setup
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.setup.outputs.matrix) }}
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v6
+
+      - name: Setup Build Environment
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/setup_env.sh
+
+      - name: Fetch Stock boot.img & Extract Config
+        env:
+          BOOT_URL: ${{ matrix.boot_url }}
+          CR_BRANCH: ${{ matrix.cr_branch }}
+          CR_VER: ${{ matrix.cr_ver }}
+          ANDROID_VER: ${{ matrix.android_ver }}
+        run: bash scripts/fetch_boot_and_config.sh
+
+      - name: Checkout Kernel Source & Hardware Modules
+        env:
+          CUSTOM_COMMIT: ${{ matrix.custom_commit }}
+          DETECTED_SHA: ${{ env.DETECTED_SHA }}
+          CR_BRANCH: ${{ env.CR_BRANCH }}
+          SCM_SUFFIX: ${{ env.SCM_SUFFIX }}
+        run: bash scripts/checkout_sources.sh
+
+      - name: Setup KernelSU / KernelSU-Next / Stock Defconfig
+        env:
+          KSU_VARIANT: ${{ matrix.ksu_variant }}
+          CR_VER: ${{ env.CR_VER }}
+          BUILD_DATE: ${{ env.BUILD_DATE }}
+        run: bash scripts/patch_root.sh
+
+      - name: Compile Kernel (Full LTO)
+        run: bash scripts/build_kernel.sh
+
+      - name: Package Boot Image & AnyKernel3
+        env:
+          IMG_NAME: ${{ env.IMG_NAME }}
+          AK3_NAME: ${{ env.AK3_NAME }}
+          CR_BRANCH: ${{ env.CR_BRANCH }}
+          CR_VER: ${{ env.CR_VER }}
+          ANDROID_VER: ${{ env.ANDROID_VER }}
+          SUBLEVEL: ${{ env.SUBLEVEL }}
+          SHORT_SHA: ${{ env.SHORT_SHA }}
+          FINAL_SHA: ${{ env.FINAL_SHA }}
+          BUILD_DATE: ${{ env.BUILD_DATE }}
+          KSU_LABEL: ${{ env.KSU_LABEL }}
+          KSU_TAG: ${{ env.KSU_TAG }}
+        run: bash scripts/package_artifacts.sh
+
+      - name: Upload Matrix Artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: dist-${{ matrix.cr_branch }}-${{ env.KSU_TAG }}
+          path: dist/*
+
+  release:
+    name: Publish Release
+    needs: [setup, build]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v6
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v7
+        with:
+          pattern: dist-*
+          path: release_dist
+          merge-multiple: true
+
+      - name: Publish Unified GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BUILT_VERSIONS: ${{ needs.setup.outputs.built_versions }}
+          KSU_CHOICE: ${{ github.event.inputs.ksu_variant }}
+        run: bash scripts/publish_release.sh
