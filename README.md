@@ -52,12 +52,13 @@
      - 长寿版闪充协议（`power/oplus`）；
      - 红外遥控（`oplus_consumer_ir`）、NFC 与传感器总线接口。
 
-7. **Matrix 并发构建与统一聚合发布**
+7. **Matrix 并发构建与全链路版本追溯**
    - 支持并发编译所有主流 Root 规格：
      - **KernelSU-Next**: 集成最新 Next 分支，支持新版特性与拓展模块；
      - **KernelSU**: 集成官方主分支，成熟稳定；
      - **Pure Stock**: 原生纯净未 Root 内核，用于对照测试与一键无损救砖。
-   - 所有构建任务完成后统一汇聚打包，自动生成 `sha256.txt` 校验清单并发布至 GitHub Releases。
+   - **全链路版本追溯**：在 Release 页面中，清晰罗列各版本对应的**官方底包来源直链**、**底包内核提取标识 (Banner)**、**底包识别 Commit Hash**、**内核源码编译 Commit（附直达链接）**以及**配套外置驱动 Commit**，方便用户快速核验并确认当前构建是否符合需求；
+   - 自动为所有产物计算生成 `sha256.txt` 校验清单并发布至 GitHub Releases。
 
 ---
 

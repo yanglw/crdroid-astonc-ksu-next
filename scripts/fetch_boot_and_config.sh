@@ -32,6 +32,8 @@ STOCK_UTS=$(echo "$KERNEL_BANNER" | sed -E -n 's/.*Linux version ([^ ]+).*/\1/p'
 DETECTED_SHA=$(echo "$STOCK_UTS" | grep -oE -- '-g[0-9a-f]+' | head -n 1 | sed 's/-g//' || true)
 SCM_SUFFIX=$(echo "$STOCK_UTS" | sed -E 's/^5\.15\.[0-9]+//' || true)
 
+echo "BOOT_URL=${CLEAN_URL}" >> "${GITHUB_ENV}"
+echo "KERNEL_BANNER=${KERNEL_BANNER}" >> "${GITHUB_ENV}"
 echo "STOCK_UTS=${STOCK_UTS}" >> "${GITHUB_ENV}"
 echo "DETECTED_SHA=${DETECTED_SHA}" >> "${GITHUB_ENV}"
 echo "SCM_SUFFIX=${SCM_SUFFIX}" >> "${GITHUB_ENV}"

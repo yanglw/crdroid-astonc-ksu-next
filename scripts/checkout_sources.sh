@@ -39,6 +39,10 @@ echo "BUILD_DATE=${BUILD_DATE}" >> "${GITHUB_ENV}"
 echo "=== [2/3] Linking 18 hardware module drivers ==="
 git clone --depth 1 -b "${CR_BRANCH}" https://github.com/crdroidandroid/android_kernel_oneplus_sm8550-modules.git "${GITHUB_WORKSPACE}/sm8550-modules"
 MROOT="${GITHUB_WORKSPACE}/sm8550-modules"
+MODULES_SHA=$(cd "$MROOT" && git rev-parse HEAD)
+MODULES_SHORT_SHA=$(echo "${MODULES_SHA}" | cut -c1-12)
+echo "MODULES_SHA=${MODULES_SHA}" >> "${GITHUB_ENV}"
+echo "MODULES_SHORT_SHA=${MODULES_SHORT_SHA}" >> "${GITHUB_ENV}"
 
 mkdir -p drivers/soc/oplus kernel/oplus_cpu
 ln -sfn "$MROOT/oplus/kernel/cpu/thermal"                                   kernel/oplus_cpu/thermal
